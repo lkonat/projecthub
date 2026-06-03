@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProjectHub</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1><a href="/" data-link class="home-link">ProjectHub</a></h1>
+    <span class="hint">Personal project tracker</span>
+  </header>
+
+  <main class="layout">
+    <!-- List page (route: /) -->
+    <section id="view-list" class="panel">
+      <div class="panel-head">
+        <h2>Projects</h2>
+        <button id="new-project-btn" class="primary">+ New</button>
+      </div>
+
+      <div class="filters">
+        <label>
+          Priority
+          <select id="filter-priority">
+            <option value="">All</option>
+          </select>
+        </label>
+        <label>
+          Status
+          <select id="filter-status">
+            <option value="">All</option>
+          </select>
+        </label>
+      </div>
+
+      <ul id="project-list" class="project-list"></ul>
+    </section>
+
+    <!-- Project page (route: /projects/:id) -->
+    <section id="view-project" class="panel detail" hidden>
+      <a href="/" data-link class="back-link">← All projects</a>
+      <div id="detail-notfound" class="empty" hidden>
+        Project not found. <a href="/" data-link>Back to all projects</a>
+      </div>
+      <div id="detail" hidden>
+        <div class="page-head">
+          <h1 id="d-name" class="page-title editable"></h1>
+          <div class="page-meta" id="d-meta"></div>
+          <button id="delete-project-btn" class="danger ghost-danger">Delete</button>
+        </div>
+
+        <section class="page-section">
+          <h3 class="section-head">Description</h3>
+          <div id="d-description" class="section-body editable"></div>
+        </section>
+
+        <section class="page-section">
+          <h3 class="section-head">Properties</h3>
+          <div id="d-properties" class="properties"></div>
+        </section>
+
+        <section class="page-section" id="git-view-section" hidden>
+          <h3 class="section-head">Git</h3>
+          <div id="git-view"></div>
+        </section>
+
+        <section class="page-section">
+          <h3 class="section-head">Actions</h3>
+          <div id="actions" class="actions"></div>
+          <div id="action-result" class="action-result muted" hidden></div>
+        </section>
+
+        <section class="page-section">
+          <h3 class="section-head">Comments</h3>
+          <form id="comment-form" class="comment-form">
+            <textarea name="body" rows="2" placeholder="Add a comment..." required></textarea>
+            <button class="primary" type="submit">Add</button>
+          </form>
+          <ul id="comment-list" class="comment-list"></ul>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <!-- New project modal -->
+  <div id="modal" class="modal" hidden>
+    <div class="modal-card">
+      <h3>New Project</h3>
+      <form id="create-form" class="form">
+        <label>
+          Name
+          <input name="name" required autofocus />
+        </label>
+        <label>
+          Description
+          <textarea name="description" rows="3"></textarea>
+        </label>
+        <label>
+          Type
+          <select name="type" id="create-type" required></select>
+        </label>
+        <div class="row">
+          <label>
+            Priority
+            <select name="priority" id="create-priority"></select>
+          </label>
+          <label>
+            Status
+            <select name="status" id="create-status"></select>
+          </label>
+        </div>
+        <div id="create-fields" class="custom-fields"></div>
+        <div class="row end">
+          <button type="button" id="cancel-create">Cancel</button>
+          <button class="primary" type="submit">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

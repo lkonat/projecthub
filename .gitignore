@@ -1,0 +1,4 @@
+.claude
+
+# Ignore node_modules in any directory, at any depth
+**/node_modules/
