@@ -1,4 +1,9 @@
 .claude
 
 # Ignore node_modules in any directory, at any depth
+
 **/node_modules/
+
+# Ignore all .db files
+
+**/*.db
