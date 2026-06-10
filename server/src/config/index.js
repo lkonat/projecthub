@@ -18,4 +18,14 @@ export const config = {
   extensionsDir: process.env.EXTENSIONS_DIR
     ? path.resolve(projectRoot, process.env.EXTENSIONS_DIR)
     : path.join(projectRoot, 'extensions'),
+
+  // ---- auth ----
+  isProd: process.env.NODE_ENV === 'production',
+  // HS256 signing secret. MUST be set in production; dev gets a default.
+  jwtSecret: process.env.JWT_SECRET || 'dev-insecure-secret-change-me',
+  jwtExpiresSec: Number(process.env.JWT_EXPIRES_SEC) || 7 * 24 * 60 * 60, // 7 days
 };
+
+if (config.isProd && config.jwtSecret === 'dev-insecure-secret-change-me') {
+  throw new Error('JWT_SECRET must be set in production');
+}

@@ -27,13 +27,13 @@ function serializeJsonColumns(params, keys) {
 }
 
 export const projectsRepository = {
-  list({ priority, status, sort = 'priority' } = {}) {
+  list(userId, { priority, status, sort = 'priority' } = {}) {
     const db = getDb();
-    const where = [];
-    const params = {};
+    const where = ['user_id = @userId'];
+    const params = { userId };
     if (priority) { where.push('priority = @priority'); params.priority = priority; }
     if (status)   { where.push('status = @status');     params.status = status; }
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const whereSql = `WHERE ${where.join(' AND ')}`;
 
     // priority ordering: critical > high > medium > low
     const orderSql = sort === 'created'
@@ -52,7 +52,30 @@ export const projectsRepository = {
     return hydrate(getDb().prepare('SELECT * FROM projects WHERE id = ?').get(id));
   },
 
+  // Ownership-scoped lookup: only returns the project if it belongs to userId.
+  findByIdForUser(userId, id) {
+    return hydrate(
+      getDb().prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(id, userId)
+    );
+  },
+
+  // True if `userId` has at least one assignment in any phase of the project.
+  // Used to grant read-only access to non-owners who are assigned work there.
+  isAssignee(userId, projectId) {
+    const row = getDb()
+      .prepare(
+        `SELECT 1
+           FROM assignments a
+           JOIN phases p ON a.phase_id = p.id
+          WHERE p.project_id = ? AND a.assignee_user_id = ?
+          LIMIT 1`
+      )
+      .get(projectId, userId);
+    return !!row;
+  },
+
   create({
+    userId,
     name,
     description = null,
     priority = 'medium',
@@ -62,12 +85,12 @@ export const projectsRepository = {
     meta = null,
   }) {
     const params = serializeJsonColumns(
-      { name, description, priority, status, type, fields, meta },
+      { user_id: userId, name, description, priority, status, type, fields, meta },
       ['fields', 'meta']
     );
     const info = getDb()
-      .prepare(`INSERT INTO projects (name, description, priority, status, type, fields, meta)
-                VALUES (@name, @description, @priority, @status, @type, @fields, @meta)`)
+      .prepare(`INSERT INTO projects (user_id, name, description, priority, status, type, fields, meta)
+                VALUES (@user_id, @name, @description, @priority, @status, @type, @fields, @meta)`)
       .run(params);
     return this.findById(info.lastInsertRowid);
   },

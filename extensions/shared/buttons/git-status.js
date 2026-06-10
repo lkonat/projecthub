@@ -1,11 +1,9 @@
-// Runs `git status` against the project's cloned repo and posts a summary
-// as a comment. Requires the Clone button to have run first (it sets
-// fields.gitClone).
-//
-// Going through ctx.services.comments.create means the realtime bridge
-// broadcasts the new comment to all viewers automatically.
+// Library button: run `git status` against the project's cloned repo and post
+// a summary as a comment. Type-agnostic — reference it from a type's
+// `buttons: [...]`. Requires the project's `gitClone` field to point at a
+// local checkout (e.g. set by the Clone button).
 
-import gitStatusTool from '../../../shared/git/status.js';
+import gitStatusTool from '../git/status.js';
 
 const MAX_FILES_IN_COMMENT = 20;
 

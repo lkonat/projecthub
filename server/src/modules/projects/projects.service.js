@@ -3,22 +3,10 @@ import { NotFoundError, ValidationError } from '../../utils/errors.js';
 import { registry } from '../../extensions/registry.js';
 import { getDb } from '../../db/connection.js';
 import { validateAndCoerce } from './fields.js';
-
-// Build the context object passed to every emitted lifecycle event.
-// Resolved lazily because services.js and realtime/index.js participate in
-// import cycles with this module — they're only imported when an emit happens,
-// by which point both modules have finished evaluating.
-async function buildCtx() {
-  const db = getDb();
-  const { services } = await import('../../services.js');
-  let realtime;
-  try { ({ realtime } = await import('../../realtime/index.js')); }
-  catch { realtime = { broadcast() {}, isStarted() { return false; } }; }
-  return { db, log: console, services, realtime };
-}
+import { access } from '../../access/access.service.js';
 
 const PRIORITIES = ['low', 'medium', 'high', 'critical'];
-const STATUSES = ['active', 'paused', 'completed', 'archived'];
+const STATUSES = ['active', 'cancelled', 'done'];
 
 function validatePriority(p) {
   if (p !== undefined && !PRIORITIES.includes(p)) {
@@ -62,19 +50,30 @@ export const projectsService = {
   PRIORITIES,
   STATUSES,
 
-  list(filters) {
+  // The actor's own projects (ownership-filtered list).
+  list(actor, filters) {
     if (filters.priority) validatePriority(filters.priority);
     if (filters.status)   validateStatus(filters.status);
-    return projectsRepository.list(filters);
+    return projectsRepository.list(actor.id, filters);
   },
 
+  // Authorized single-project read (owner OR assignee). Returns the project.
+  view(actor, id) {
+    return access.authorize(actor, id, 'project.view');
+  },
+
+  // Lookup by id WITHOUT an authorization check — the trusted internal lane,
+  // for service-to-service calls and existence checks on an already-authorized
+  // project (hooks, cascades, comments/checklist/phases services). Anything a
+  // PRINCIPAL initiates must go through an actor-authorized method instead;
+  // the policy table (server/src/access/) is the single source of truth.
   get(id) {
     const project = projectsRepository.findById(id);
     if (!project) throw new NotFoundError('Project');
     return project;
   },
 
-  async create({ name, description, priority, status, type, fields, meta }) {
+  async create(actor, { name, description, priority, status, type, fields, meta }) {
     if (!name || !name.trim()) throw new ValidationError('name is required');
     validateType(type);
     validateMeta(meta);
@@ -97,7 +96,6 @@ export const projectsService = {
     validateStatus(input.status);
 
     const db = getDb();
-    const ctx = await buildCtx();
 
     // before-create + insert run in one transaction so a hook can cancel cleanly.
     // We can't use db.transaction(fn) because it doesn't await async functions —
@@ -105,8 +103,8 @@ export const projectsService = {
     db.exec('BEGIN');
     let project;
     try {
-      await registry.emit('project.before-create', { input }, ctx);
-      project = projectsRepository.create(input);
+      await registry.emit('project.before-create', { input });
+      project = projectsRepository.create({ ...input, userId: actor.id });
       db.exec('COMMIT');
     } catch (err) {
       db.exec('ROLLBACK');
@@ -114,13 +112,21 @@ export const projectsService = {
     }
 
     // after-create fires post-commit; errors are logged but don't fail the request.
-    await registry.emit('project.after-create', { project, input }, ctx);
+    await registry.emit('project.after-create', { project, input });
 
     return project;
   },
 
-  async update(id, patch) {
+  async update(actor, id, patch) {
     const existing = this.get(id); // throws if missing
+    access.authorize(actor, id, 'project.edit', {}, existing); // owner; SYSTEM bypasses (e.g. auto-close)
+    // A closed (non-active) project is a frozen record: the status field may
+    // still change (complete / cancel / reactivate), but content edits require
+    // the project to be active. Reactivate it first to edit. SYSTEM bypasses.
+    const CONTENT_FIELDS = ['name', 'description', 'priority', 'type', 'fields', 'meta'];
+    if (CONTENT_FIELDS.some((f) => patch[f] !== undefined)) {
+      access.authorize(actor, id, 'project.edit-content', {}, existing);
+    }
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw new ValidationError('name cannot be empty');
       patch.name = patch.name.trim();
@@ -164,14 +170,15 @@ export const projectsService = {
     }
 
     const updated = projectsRepository.update(id, patch);
-    await registry.emit('project.after-update', { project: updated, before: existing }, await buildCtx());
+    await registry.emit('project.after-update', { project: updated, before: existing });
     return updated;
   },
 
-  async remove(id) {
+  async remove(actor, id) {
     const existing = this.get(id); // throws if missing
+    access.authorize(actor, id, 'project.delete', {}, existing);
     const removed = projectsRepository.remove(id);
-    await registry.emit('project.after-delete', { id, project: existing }, await buildCtx());
+    await registry.emit('project.after-delete', { id, project: existing });
     return removed;
   },
 
@@ -179,30 +186,30 @@ export const projectsService = {
   // change — existing keys are preserved. Pass `null` for a key to clear it
   // (subject to required-field validation against the project's type).
   //
-  //   projectsService.updateFields(id, { gitClone: '/Users/.../onboarding' });
+  //   projectsService.updateFields(actor, id, { gitClone: '/Users/.../onboarding' });
   //
-  // Delegates to `update()` so all validation/coercion still applies.
-  async updateFields(id, partial) {
+  // Delegates to `update()` so all validation/coercion (and authorization) apply.
+  async updateFields(actor, id, partial) {
     if (!partial || typeof partial !== 'object') {
       throw new ValidationError('updateFields requires an object of field values');
     }
     const existing = this.get(id);
     const merged = { ...(existing.fields || {}), ...partial };
-    return this.update(id, { fields: merged });
+    return this.update(actor, id, { fields: merged });
   },
 
   // Partial update for the `meta` object — free-form metadata not bound to
   // the type's field schema. Pass only the keys you want to change;
   // existing keys are preserved. Pass `null` for a key to clear it.
   //
-  //   projectsService.updateMeta(id, { lastClonedAt: new Date().toISOString() });
-  //   projectsService.updateMeta(id, { tempFlag: null });   // remove tempFlag
-  async updateMeta(id, partial) {
+  //   projectsService.updateMeta(actor, id, { lastClonedAt: ... });
+  //   projectsService.updateMeta(actor, id, { tempFlag: null });   // remove tempFlag
+  async updateMeta(actor, id, partial) {
     if (!partial || typeof partial !== 'object' || Array.isArray(partial)) {
       throw new ValidationError('updateMeta requires a plain object');
     }
     const existing = this.get(id);
     const merged = dropNullish({ ...(existing.meta || {}), ...partial });
-    return this.update(id, { meta: merged });
+    return this.update(actor, id, { meta: merged });
   },
 };

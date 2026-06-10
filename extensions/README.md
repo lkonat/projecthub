@@ -3,6 +3,13 @@
 Everything in this directory is loaded at server boot. Restart the server
 after adding, editing, or removing any file here.
 
+If a file fails to load — a bad button/hook `id`, an import error, a duplicate,
+etc. — the loader **skips it and reports it loudly**: the boot summary shows
+`⚠ N FAILED`, followed by a block naming each failure and why. So when a button
+or hook doesn't show up, check the end of the server boot log first. (Note: a
+button/hook `id` must match `/^[a-z][a-z0-9_-]*$/i` — letters, digits, `_`, `-`,
+**no spaces**; the `label` is free-form.)
+
 ```
 extensions/
 ├── global/                       # extensions that apply across all types
@@ -78,14 +85,16 @@ A hook reacts to a lifecycle event. Default export:
 // extensions/types/my-type/hooks/welcome-comment.js
 export default {
   event: 'project.after-create',          // see events below
-  async handler(payload, ctx) {
+  async handler(payload, ctx, settings) { // `settings` (3rd arg): see Per-type settings
     // do stuff
   },
 };
 ```
 
 A hook under `types/<id>/hooks/` automatically only fires for that type. A
-hook under `global/hooks/` fires for every project.
+hook under `global/hooks/` fires for every project. The optional third
+argument `settings` is the project type's settings (or `undefined`) — see
+[Per-type settings](#per-type-settings).
 
 ### Events
 
@@ -151,7 +160,7 @@ export default {
   label: 'Promote',                    // shown in the UI
   confirm: 'Promote this project?',    // optional — browser confirm() prompt
   destructive: false,                  // optional — UI styles the button red
-  async handler({ project }, ctx) {
+  async handler({ project }, ctx, settings) { // `settings` (3rd arg): Per-type settings
     ctx.services.projects.update(project.id, { priority: 'critical' });
     return { message: 'Promoted' };    // surfaced as a toast in the UI
   },
@@ -160,6 +169,110 @@ export default {
 
 A button under `types/<id>/buttons/` only shows on projects of that type.
 A button under `global/buttons/` shows on every project.
+
+### Reusable buttons (a library)
+
+When several types need the same action, define the button **once** in the
+library at `extensions/shared/buttons/` (a plain button object, no `type`), then
+have each type **opt in** from its `type.js` via a `buttons: [...]` array:
+
+```js
+// extensions/shared/buttons/clone.js — defined once, type-agnostic
+export default { id: 'clone', label: 'Clone', async handler({ project }, ctx) { ... } };
+```
+```js
+// extensions/types/lass-project/type.js
+import clone      from '../../shared/buttons/clone.js';
+import createRepo from '../../shared/buttons/create-repo.js';
+
+export default {
+  id: 'lass-project',
+  label: '…',
+  buttons: [ clone, createRepo,
+             { ...clone, id: 'clone-fork', label: 'Fork & clone' } ], // reuse + override
+  fields: [ … ],
+};
+```
+
+Each entry in `buttons[]` is registered **scoped to that type** — the same
+library object can be listed by many types. Per-type tweaks use object spread
+(`{ ...clone, label: '…' }`), the composition equivalent of "inherit + override"
+— no class hierarchy.
+
+Button identity is **`(type, id)`**, so two types can both use a button with
+`id: 'clone'` without colliding. A type's effective buttons are the globals plus
+its own; a typed button **shadows** a global one of the same id. The action
+endpoint resolves `POST /actions/<id>` against the project's type.
+
+These compose with the folder convention: `types/<id>/buttons/*.js` files still
+register for that type alongside whatever the type's `buttons: [...]` lists.
+
+### Conditional display & disabling
+
+Two optional predicates gate a button against the **specific project**. Both
+are pure, synchronous functions of the project object (its `fields`, `meta`,
+`status`, `priority`, …):
+
+```js
+export default {
+  id: 'archive',
+  label: 'Archive',
+  // Hide the button entirely when this returns false. Default: always shown.
+  visible: (project) => project.status !== 'archived',
+  // Grey it out when this is truthy. Return a STRING to show that text as the
+  // disabled tooltip/reason. Default: always enabled.
+  disabled: (project) =>
+    project.meta?.locked ? 'Project is locked' : false,
+  async handler({ project }, ctx) { /* ... */ },
+};
+```
+
+- `visible(project) → boolean` — `false` drops the button from the list.
+- `disabled(project) → boolean | string` — truthy disables it; a string is the
+  reason surfaced as a tooltip.
+
+A throwing predicate fails safe (`visible` hides, `disabled` disables) and is
+logged. The rules are **enforced server-side**: the action endpoint
+re-evaluates them, so a hidden button returns `404 BUTTON_NOT_AVAILABLE` and a
+disabled one returns `409 BUTTON_DISABLED` even if a client POSTs directly.
+
+The resolved buttons for a project (type-filtered, hidden ones dropped, each
+with its computed `disabled`/`disabledReason`) are available at
+`GET /api/projects/<id>/actions` — this is what the web client renders.
+
+### Asking for inputs
+
+A button can prompt the user for values before it runs. `inputs` uses the
+**same field schema as a type's `fields`** (`text` · `textarea` · `number` ·
+`date` · `select` · `boolean`, plus `required`, `options`, `default`):
+
+```js
+export default {
+  id: 'create-repo',
+  label: 'Create GitHub repo',
+  inputs: [
+    { key: 'name', label: 'Repository name', type: 'text', required: true,
+      // `default` may be a literal OR a function(project), evaluated per
+      // project so the form opens pre-filled.
+      default: (project) => project.name },
+    { key: 'private', label: 'Private repository', type: 'boolean', default: true },
+    { key: 'description', label: 'Description', type: 'textarea' },
+  ],
+  async handler({ project, input }, ctx) {
+    // input === { name, private, description } — validated & coerced
+  },
+};
+```
+
+The web client renders a small form (a button with `inputs` opens a modal
+instead of running immediately). Values are **validated and coerced
+server-side** with the same logic as type fields: bad or missing-required
+values return `400`, unknown keys are stripped, and the result is passed to the
+handler as the second destructured property: `handler({ project, input }, ctx)`.
+Buttons without `inputs` receive `input = {}`.
+
+Send inputs as the JSON body:
+`POST /api/projects/<id>/actions/<button-id>` with `{ "name": "thing", … }`.
 
 Invoke from any client: `POST /api/projects/<id>/actions/<button-id>`.
 Response:
@@ -189,6 +302,59 @@ Use this for libraries, wrappers, or tools you call from multiple
 extensions. Helpers used by exactly one type can also live inside that
 type's folder if you prefer:
 `extensions/types/my-type/helpers/foo.js`.
+
+---
+
+## Per-type settings
+
+A project type can carry its own configuration in a `.env` file placed in the
+type directory, surfaced through a small hub:
+
+```
+types/<id>/
+├── type.js
+├── .env                 # this type's config (KEY=VALUE)
+├── settings/
+│   └── settings.js      # the hub — loads ../.env, exposes accessors
+├── hooks/
+└── buttons/
+```
+
+The loader **loads** `types/<id>/settings/settings.js` (if present) and
+**injects** its default export into that type's hook and button handlers as the
+**third argument**, `settings`. `settings/settings.js` wraps the shared loader:
+
+```js
+// types/<id>/settings/settings.js
+import { createSettings } from '../../../shared/settings/env.js';
+export default createSettings(import.meta.url);   // reads ../.env
+```
+
+Handlers receive it alongside `ctx` — no import. It's `undefined` for a type
+with no `settings/` folder, so read defensively:
+
+```js
+// a hook:   handler(payload, ctx, settings)
+// a button: handler({ project, input }, ctx, settings)
+async handler({ project }, ctx, settings) {
+  const url = project.fields?.gitRepoUrl ?? settings?.get('GIT_URL');
+  // settings?.get('GIT_URL') · settings?.require('K') · settings?.bool('F', false)
+  // settings?.int('N', 5000) · settings?.values · settings?.typeId · settings?.loaded
+}
+```
+
+`ctx` stays a memoized, type-agnostic singleton (`log`, `services`, `realtime`,
+`db`); `settings` is the per-type config, passed separately so the two never
+mix. Need a type's settings outside a handler? `registry.getSettings(typeId)`.
+
+**Precedence** for a key: the type's `.env` wins, then `process.env`, then the
+caller's default. The loader uses only Node built-ins (no `dotenv`) since the
+extensions tree has no reachable `node_modules`, and it never mutates
+`process.env`, so each type's settings stay isolated.
+
+To give another type settings, drop a `settings/settings.js` + `.env` in its
+folder — the loader finds them by location and injects automatically. Commit a
+`.env.example` as documentation.
 
 ---
 

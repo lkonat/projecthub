@@ -21,6 +21,10 @@ import { Server } from 'socket.io';
 import { channels } from './channels.js';
 import { attachBridge } from './bridge.js';
 import { registry } from '../extensions/registry.js';
+import { config } from '../config/index.js';
+import { verifyJwt } from '../utils/jwt.js';
+import { parseCookies } from '../middleware/auth.js';
+import { projectsRepository } from '../modules/projects/projects.repository.js';
 
 const PROJECT_CHANNEL_RE = /^project:(\d+)$/;
 
@@ -39,7 +43,7 @@ async function emitProjectLifecycle(channel, event) {
   try { project = services.projects.get(projectId); }
   catch { return; } // project no longer exists
   try {
-    await registry.emit(event, { project, projectId }, undefined);
+    await registry.emit(event, { project, projectId });
   } catch (err) {
     console.error(`[realtime] ${event} hook error:`, err.message);
   }
@@ -56,13 +60,28 @@ export const realtime = {
       cors: { origin: true, credentials: true }, // local app — open by default
     });
 
+    // Authenticate every socket from the JWT cookie before it connects.
+    io.use((socket, next) => {
+      try {
+        const token = parseCookies(socket.handshake.headers.cookie).token;
+        const payload = verifyJwt(token, config.jwtSecret);
+        socket.user = { id: payload.sub, username: payload.username };
+        next();
+      } catch {
+        next(new Error('unauthorized'));
+      }
+    });
+
     io.on('connection', (socket) => {
-      // Every client auto-joins the global `projects` room so they pick
-      // up list-level changes without an explicit subscribe.
-      socket.join(channels.projects());
+      // Per-user room: list-level events (project.created/updated/deleted) are
+      // broadcast only to their owner's room, so users never see each other's.
+      socket.join(channels.user(socket.user.id));
 
       socket.on('subscribe', async (channel) => {
         if (typeof channel !== 'string' || !channel) return;
+        // A user may only subscribe to a project room they own.
+        const m = PROJECT_CHANNEL_RE.exec(channel);
+        if (m && !projectsRepository.findByIdForUser(socket.user.id, Number(m[1]))) return;
         const sizeBefore = io.sockets.adapter.rooms.get(channel)?.size ?? 0;
         socket.join(channel);
         // Room went from 0 → 1 viewers — emit activate for project channels.

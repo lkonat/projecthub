@@ -7,3 +7,8 @@
 # Ignore all .db files
 
 **/*.db
+
+# Ignore env files (may contain secrets like GITHUB_TOKEN) at any depth.
+# .env.example is a different filename and stays tracked.
+
+**/.env

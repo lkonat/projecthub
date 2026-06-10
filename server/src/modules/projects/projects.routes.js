@@ -15,6 +15,7 @@ router.get('/:id/meta',                asyncHandler(projectsController.getMeta))
 router.get('/:id/git/status',          asyncHandler(projectsController.getGitStatus));  // live git status
 router.get('/:id/git/diff',            asyncHandler(projectsController.getGitDiff));    // unified diff for one file
 router.post('/:id/git/revert',         asyncHandler(projectsController.revertGitHunk)); // discard one hunk
+router.get('/:id/actions',             asyncHandler(actionsController.list));            // buttons resolved for this project
 router.post('/:id/actions/:buttonId',  asyncHandler(actionsController.run));
 
 export default router;

@@ -5,6 +5,8 @@ const LADDER = ['low', 'medium', 'high', 'critical'];
 export default {
   id: 'bump-priority',
   label: 'Bump priority',
+  // Nothing to bump at the top of the ladder — hide the button entirely.
+  visible: (project) => project.priority !== 'critical',
   async handler({ project }, ctx) {
     const idx = LADDER.indexOf(project.priority);
     if (idx < 0 || idx === LADDER.length - 1) {

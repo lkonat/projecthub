@@ -9,8 +9,40 @@
 <body>
   <header class="topbar">
     <h1><a href="/" data-link class="home-link">ProjectHub</a></h1>
-    <span class="hint">Personal project tracker</span>
+    <nav id="topnav" class="topnav" hidden>
+      <a href="/" data-link data-nav="/">Projects</a>
+      <a href="/assignments" data-link data-nav="/assignments">Current assignments</a>
+      <a href="/tasks" data-link data-nav="/tasks">All tasks</a>
+      <a href="/settings" data-link data-nav="/settings">Settings</a>
+    </nav>
+    <span id="user-area" class="user-area" hidden>
+      <span id="user-name" class="user-name"></span>
+      <button id="logout-btn" class="ghost">Log out</button>
+    </span>
   </header>
+
+  <!-- Auth overlay: covers the app until the user is logged in -->
+  <div id="auth-view" class="auth-overlay" hidden>
+    <div class="auth-card">
+      <h2 id="auth-title">Log in</h2>
+      <form id="auth-form" class="form">
+        <label>
+          Username
+          <input name="username" required autocomplete="username" autofocus />
+        </label>
+        <label>
+          Password
+          <input name="password" type="password" required autocomplete="current-password" />
+        </label>
+        <div id="auth-error" class="auth-error" hidden></div>
+        <button class="primary" type="submit" id="auth-submit">Log in</button>
+      </form>
+      <p class="auth-toggle">
+        <span id="auth-toggle-text">No account?</span>
+        <a href="#" id="auth-toggle">Register</a>
+      </p>
+    </div>
+  </div>
 
   <main class="layout">
     <!-- List page (route: /) -->
@@ -45,42 +77,118 @@
         Project not found. <a href="/" data-link>Back to all projects</a>
       </div>
       <div id="detail" hidden>
+        <div id="readonly-banner" class="readonly-banner" hidden>
+          You’re assigned to this project but don’t own it — you can comment and update your own assignments.
+        </div>
         <div class="page-head">
           <h1 id="d-name" class="page-title editable"></h1>
           <div class="page-meta" id="d-meta"></div>
+          <button id="activate-project-btn" class="ghost" hidden>Set active</button>
+          <button id="complete-project-btn" class="ghost" hidden>Complete</button>
+          <button id="cancel-project-btn" class="ghost-danger" hidden>Cancel project</button>
           <button id="delete-project-btn" class="danger ghost-danger">Delete</button>
         </div>
 
-        <section class="page-section">
-          <h3 class="section-head">Description</h3>
-          <div id="d-description" class="section-body editable"></div>
-        </section>
+        <div class="detail-cols">
+          <div class="detail-main">
+            <section class="page-section">
+              <h3 class="section-head">Description</h3>
+              <div id="d-description" class="section-body editable"></div>
+            </section>
 
-        <section class="page-section">
-          <h3 class="section-head">Properties</h3>
-          <div id="d-properties" class="properties"></div>
-        </section>
+            <section class="page-section">
+              <h3 class="section-head">Properties</h3>
+              <div id="d-properties" class="properties"></div>
+            </section>
 
-        <section class="page-section" id="git-view-section" hidden>
-          <h3 class="section-head">Git</h3>
-          <div id="git-view"></div>
-        </section>
+            <section class="page-section" id="git-view-section" hidden>
+              <h3 class="section-head">Git</h3>
+              <div id="git-view"></div>
+            </section>
 
-        <section class="page-section">
-          <h3 class="section-head">Actions</h3>
-          <div id="actions" class="actions"></div>
-          <div id="action-result" class="action-result muted" hidden></div>
-        </section>
+            <section class="page-section">
+              <h3 class="section-head">Actions</h3>
+              <div id="actions" class="actions"></div>
+              <div id="action-result" class="action-result muted" hidden></div>
+            </section>
 
-        <section class="page-section">
-          <h3 class="section-head">Comments</h3>
-          <form id="comment-form" class="comment-form">
-            <textarea name="body" rows="2" placeholder="Add a comment..." required></textarea>
-            <button class="primary" type="submit">Add</button>
-          </form>
-          <ul id="comment-list" class="comment-list"></ul>
-        </section>
+            <section class="page-section">
+              <h3 class="section-head">Checklist <span id="checklist-progress" class="checklist-progress"></span></h3>
+              <form id="checklist-form" class="checklist-form">
+                <input name="text" placeholder="Add an item..." required />
+                <button class="primary" type="submit">Add</button>
+              </form>
+              <ul id="checklist" class="checklist"></ul>
+            </section>
+
+            <section class="page-section">
+              <h3 class="section-head">Comments</h3>
+              <form id="comment-form" class="comment-form">
+                <textarea name="body" rows="2" placeholder="Add a comment..." required></textarea>
+                <button class="primary" type="submit">Add</button>
+              </form>
+              <ul id="comment-list" class="comment-list"></ul>
+            </section>
+          </div>
+
+          <aside class="detail-side">
+            <section class="page-section">
+              <div class="section-head-row">
+                <h3 class="section-head">Phases <span id="phases-progress" class="checklist-progress"></span></h3>
+                <button id="add-phase-btn" type="button" class="mini ghost">+ Add phase</button>
+              </div>
+              <ol id="phases" class="phases"></ol>
+            </section>
+          </aside>
+        </div>
       </div>
+    </section>
+
+    <!-- Tasks page (routes: /assignments = current, /tasks = all) -->
+    <section id="view-tasks" class="panel" hidden>
+      <div class="panel-head">
+        <h2 id="tasks-title">My assignments</h2>
+        <span id="tasks-count" class="checklist-progress"></span>
+      </div>
+      <p id="tasks-subtitle" class="tasks-subtitle"></p>
+      <div id="tasks-list" class="tasks-list"></div>
+    </section>
+
+    <!-- Settings page (route: /settings) — the user's own profile -->
+    <section id="view-settings" class="panel" hidden>
+      <div class="panel-head">
+        <h2>Settings</h2>
+      </div>
+      <p class="tasks-subtitle">Update your contact details and how the system should reach you.</p>
+      <form id="settings-form" class="form settings-form">
+        <label>
+          Username
+          <input name="username" disabled />
+        </label>
+        <label>
+          Name
+          <input name="name" autocomplete="name" placeholder="Your full name" />
+        </label>
+        <label>
+          Email
+          <input name="email" type="email" autocomplete="email" placeholder="you@example.com" />
+        </label>
+        <label>
+          Phone
+          <input name="phone" type="tel" autocomplete="tel" placeholder="+1 555 123 4567" />
+        </label>
+        <label>
+          Preferred contact method
+          <select name="contact_preference">
+            <option value="none">Don't contact me</option>
+            <option value="email">Email</option>
+            <option value="sms">SMS / text</option>
+            <option value="phone">Phone call</option>
+          </select>
+        </label>
+        <div id="settings-msg" class="settings-msg" hidden></div>
+        <button class="primary" type="submit">Save changes</button>
+      </form>
     </section>
   </main>
 
@@ -115,6 +223,80 @@
         <div class="row end">
           <button type="button" id="cancel-create">Cancel</button>
           <button class="primary" type="submit">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Action-input modal: a button's declared inputs are rendered here -->
+  <div id="action-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h3 id="action-modal-title">Action</h3>
+      <form id="action-form" class="form">
+        <div id="action-fields" class="custom-fields"></div>
+        <div class="row end">
+          <button type="button" id="action-cancel">Cancel</button>
+          <button class="primary" type="submit">Run</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- New phase modal -->
+  <div id="phase-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h3>New phase</h3>
+      <form id="phase-form" class="form">
+        <label>
+          Name
+          <input name="name" required autofocus placeholder="e.g. Design" />
+        </label>
+        <label>
+          Description
+          <textarea name="description" rows="3" placeholder="Optional"></textarea>
+        </label>
+        <div class="row end">
+          <button type="button" id="phase-cancel">Cancel</button>
+          <button class="primary" type="submit">Add phase</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- New assignment modal -->
+  <div id="assignment-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h3 id="assignment-modal-title">New assignment</h3>
+      <form id="assignment-form" class="form">
+        <label>
+          Title
+          <input name="title" required autofocus placeholder="What needs doing?" />
+        </label>
+        <label>
+          Description
+          <textarea name="description" rows="3" placeholder="Optional"></textarea>
+        </label>
+        <div class="row">
+          <label>
+            Assign to
+            <select name="assignee_type" id="assignee-type">
+              <option value="user">User</option>
+              <option value="agent">Agent</option>
+              <option value="bot">Bot</option>
+            </select>
+          </label>
+          <label id="assignee-user-field">
+            User
+            <select name="assignee_user_id" id="assignee-user"></select>
+          </label>
+          <label id="assignee-label-field" hidden>
+            Name
+            <input name="assignee_label" id="assignee-label" placeholder="agent / bot name" />
+          </label>
+        </div>
+        <div class="row end">
+          <button type="button" id="assignment-cancel">Cancel</button>
+          <button class="primary" type="submit">Assign</button>
         </div>
       </form>
     </div>

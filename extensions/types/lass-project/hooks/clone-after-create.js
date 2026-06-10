@@ -1,20 +1,17 @@
-// Clones the project's repo. If the target directory already contains a
-// git clone, the button is a no-op (reports "already cloned").
+// Fires after a lass-project project is created.
+// (Type is inferred from this file's location under types/lass-project/.)
 //
-// `project.fields.gitClone` is the local target — either an absolute path
-// or a name relative to the server's cwd (same resolution the clone tool
-// uses internally).
+// `settings` (3rd arg) is this type's settings object — injected by the
+// registry when types/lass-project/settings/ is defined, and `undefined`
+// otherwise. We read from it only if present.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import gitCloneTool from '../../../shared/git/clone.js';
 
 export default {
-  id: 'clone',
-  label: 'Clone',
-  destructive: true,
-  // confirm: 'Are you sure to clone',
-  async handler({ project }, ctx) {
+  event: 'project.after-create',
+  async handler({ project }, ctx, settings) {
     const gitClone = project?.fields?.gitClone;
     if (!gitClone) {
       throw new Error('No gitClone field set on this project');
@@ -22,7 +19,8 @@ export default {
 
     // Resolve the same way gitCloneTool does so the existence check matches
     // what the tool would write to.
-    const targetDir = path.resolve(process.cwd(), gitClone);
+    const baseDir = settings?.cloneBaseDir || process.cwd();
+    const targetDir = path.resolve(baseDir, gitClone);
 
     if (fs.existsSync(targetDir)) {
       if (fs.existsSync(path.join(targetDir, '.git'))) {
@@ -34,9 +32,19 @@ export default {
       throw new Error(`Path already exists but is not a git repository: ${targetDir}`);
     }
 
+    // Prefer the project's own repo URL; fall back to the type's settings
+    // default (GIT_URL in the type .env), if settings are defined.
+    const gitUrl = project?.fields?.gitRepoUrl || settings?.gitUrl;
+    if (!gitUrl) {
+      throw new Error(
+        'No git URL: set the project\'s "gitRepoUrl" field or GIT_URL in the type .env',
+      );
+    }
+
     const res = await gitCloneTool.execute({
       cloneName: gitClone,
-      gitUrl: 'https://github.com/lkonat/question_app.git',
+      gitUrl,
+      ...(settings?.cloneBaseDir ? { baseDir: settings.cloneBaseDir } : {}),
     });
 
     return { message: `Cloned to ${res.targetDir}` };

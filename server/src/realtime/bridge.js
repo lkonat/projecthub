@@ -17,19 +17,19 @@ const MAPPINGS = [
   {
     internal: 'project.after-create',
     wire:     wireEvents.PROJECT_CREATED,
-    channels: () => [channels.projects()],
+    channels: ({ project }) => [channels.user(project.user_id)],
     payload:  ({ project }) => ({ project }),
   },
   {
     internal: 'project.after-update',
     wire:     wireEvents.PROJECT_UPDATED,
-    channels: ({ project }) => [channels.projects(), channels.project(project.id)],
+    channels: ({ project }) => [channels.user(project.user_id), channels.project(project.id)],
     payload:  ({ project }) => ({ project }),
   },
   {
     internal: 'project.after-delete',
     wire:     wireEvents.PROJECT_DELETED,
-    channels: () => [channels.projects()],
+    channels: ({ project }) => [channels.user(project.user_id)],
     payload:  ({ id }) => ({ id }),
   },
   {
@@ -47,6 +47,94 @@ const MAPPINGS = [
   {
     internal: 'comment.after-delete',
     wire:     wireEvents.COMMENT_DELETED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ id, projectId }) => ({ projectId, id }),
+  },
+  {
+    internal: 'checklist.after-create',
+    wire:     wireEvents.CHECKLIST_CREATED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ item, projectId }) => ({ projectId, item }),
+  },
+  {
+    internal: 'checklist.after-update',
+    wire:     wireEvents.CHECKLIST_UPDATED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ item, projectId }) => ({ projectId, item }),
+  },
+  {
+    internal: 'checklist.after-delete',
+    wire:     wireEvents.CHECKLIST_DELETED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ id, projectId }) => ({ projectId, id }),
+  },
+  {
+    internal: 'checklist.after-reorder',
+    wire:     wireEvents.CHECKLIST_REORDERED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ items, projectId }) => ({ projectId, items }),
+  },
+  {
+    internal: 'phase.after-create',
+    wire:     wireEvents.PHASE_CREATED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ phase, projectId }) => ({ projectId, phase }),
+  },
+  {
+    internal: 'phase.after-update',
+    wire:     wireEvents.PHASE_UPDATED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ phase, projectId }) => ({ projectId, phase }),
+  },
+  {
+    internal: 'phase.after-delete',
+    wire:     wireEvents.PHASE_DELETED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ id, projectId }) => ({ projectId, id }),
+  },
+  {
+    internal: 'phase.after-reorder',
+    wire:     wireEvents.PHASE_REORDERED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ phases, projectId }) => ({ projectId, phases }),
+  },
+  {
+    internal: 'phase.after-complete',
+    wire:     wireEvents.PHASE_COMPLETED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ phase, projectId }) => ({ projectId, phase }),
+  },
+  {
+    // A phase became active (idle -> active). Status change → same wire event as
+    // any other phase update so the client re-renders.
+    internal: 'phase.after-activate',
+    wire:     wireEvents.PHASE_UPDATED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ phase, projectId }) => ({ projectId, phase }),
+  },
+  {
+    // "Go backward": a passed phase reopened. It's a phase status change, so it
+    // rides the same wire event as any other phase update.
+    internal: 'phase.after-reopen',
+    wire:     wireEvents.PHASE_UPDATED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ phase, projectId }) => ({ projectId, phase }),
+  },
+  {
+    internal: 'assignment.after-create',
+    wire:     wireEvents.ASSIGNMENT_CREATED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ assignment, projectId }) => ({ projectId, assignment }),
+  },
+  {
+    internal: 'assignment.after-update',
+    wire:     wireEvents.ASSIGNMENT_UPDATED,
+    channels: ({ projectId }) => [channels.project(projectId)],
+    payload:  ({ assignment, projectId }) => ({ projectId, assignment }),
+  },
+  {
+    internal: 'assignment.after-delete',
+    wire:     wireEvents.ASSIGNMENT_DELETED,
     channels: ({ projectId }) => [channels.project(projectId)],
     payload:  ({ id, projectId }) => ({ projectId, id }),
   },

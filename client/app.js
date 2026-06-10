@@ -12,9 +12,15 @@ let router;
 async function api(method, path, body) {
   const res = await fetch(API + path, {
     method,
+    credentials: 'include', // send the auth cookie
     headers: body ? { 'Content-Type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401) {
+    // Session missing/expired — drop back to the login overlay.
+    showAuth();
+    throw new Error('Not authenticated');
+  }
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -25,11 +31,79 @@ async function api(method, path, body) {
 }
 
 const state = {
+  user: null,
   projects: [],
   selectedId: null,
+  canEditSelected: true, // false when viewing a project you're assigned to but don't own
+  caps: {}, // per-project capability map from GET /projects/:id (project-scoped affordances)
   meta: { priorities: [], statuses: [] },
   filters: { priority: '', status: '' },
 };
+
+// ─── Capabilities ─────────────────────────────────────────────────────────
+// The server is ALWAYS the enforcement boundary; these only decide which
+// affordances to show. Project-scoped affordances come from the capability map;
+// per-ROW affordances come from server-computed booleans on each row (canDelete,
+// canUpdate) — the server evaluates the policy (including conditional rules it
+// can't ship to the client) and the UI just reads the result.
+function can(action) { return !!(state.caps && state.caps[action]); }
+
+// ─── Auth ───────────────────────────────────────────────────────────────
+function showAuth() { $('#auth-view').hidden = false; }
+function hideAuth() { $('#auth-view').hidden = true; }
+function showAuthError(msg) { const el = $('#auth-error'); el.textContent = msg; el.hidden = false; }
+function hideAuthError() { $('#auth-error').hidden = true; }
+
+async function fetchMe() {
+  try {
+    const res = await fetch(API + '/auth/me', { credentials: 'include' });
+    if (!res.ok) return null;
+    return (await res.json()).data;
+  } catch { return null; }
+}
+
+let authMode = 'login';
+function wireAuth() {
+  const form = $('#auth-form');
+  const toggle = $('#auth-toggle');
+
+  toggle.addEventListener('click', (e) => {
+    e.preventDefault();
+    authMode = authMode === 'login' ? 'register' : 'login';
+    const login = authMode === 'login';
+    $('#auth-title').textContent = login ? 'Log in' : 'Register';
+    $('#auth-submit').textContent = login ? 'Log in' : 'Register';
+    $('#auth-toggle-text').textContent = login ? 'No account?' : 'Have an account?';
+    toggle.textContent = login ? 'Register' : 'Log in';
+    form.elements.password.autocomplete = login ? 'current-password' : 'new-password';
+    hideAuthError();
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    hideAuthError();
+    const username = form.elements.username.value.trim();
+    const password = form.elements.password.value;
+    try {
+      const res = await fetch(API + '/auth/' + authMode, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error?.message || 'Authentication failed');
+      location.reload(); // re-init cleanly as the logged-in user
+    } catch (err) {
+      showAuthError(err.message);
+    }
+  });
+
+  $('#logout-btn').addEventListener('click', async () => {
+    try { await fetch(API + '/auth/logout', { method: 'POST', credentials: 'include' }); }
+    finally { location.reload(); }
+  });
+}
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -83,11 +157,17 @@ function typeById(id) {
 // Render the custom-field inputs for the given type into `container`.
 // `values` is a map of key -> current value used to pre-fill the inputs.
 function renderFields(container, typeId, values = {}) {
-  container.innerHTML = '';
-  const t = typeById(typeId);
-  if (!t || !t.fields || t.fields.length === 0) return;
+  renderFieldDefs(container, typeById(typeId)?.fields || [], values);
+}
 
-  for (const f of t.fields) {
+// Render an arbitrary array of field definitions into `container`. Shared by
+// the create-project form (a type's fields) and the action-input modal (a
+// button's inputs). `values` pre-fills inputs by key.
+function renderFieldDefs(container, defs, values = {}) {
+  container.innerHTML = '';
+  if (!defs || defs.length === 0) return;
+
+  for (const f of defs) {
     const wrap = document.createElement('label');
     const current = values[f.key];
     const name = `field:${f.key}`;
@@ -148,29 +228,59 @@ function renderFields(container, typeId, values = {}) {
   }
 }
 
-// Render action buttons applicable to this project (no type filter, or matching type).
-function renderActions(project) {
+// Render the action buttons the server resolved for this project. The server
+// already filtered by type and dropped hidden buttons; each remaining button
+// carries { disabled, disabledReason }.
+function renderActions(buttons) {
   const container = $('#actions');
   container.innerHTML = '';
-  const buttons = (state.meta.buttons || []).filter(
-    (b) => !b.type || b.type === project.type
-  );
   for (const b of buttons) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'action' + (b.destructive ? ' destructive' : '');
     btn.textContent = b.label;
     btn.dataset.buttonId = b.id;
-    btn.addEventListener('click', () => runAction(b, btn));
+    if (b.disabled) {
+      btn.disabled = true;
+      btn.classList.add('is-disabled');
+      if (b.disabledReason) btn.title = b.disabledReason;
+    } else {
+      btn.addEventListener('click', () => runAction(b, btn));
+    }
     container.appendChild(btn);
+  }
+}
+
+// Fetch the buttons applicable to this project (visibility + disabled state
+// are computed server-side) and render them.
+async function loadActions(id) {
+  try {
+    const buttons = await api('GET', `/projects/${id}/actions`);
+    if (state.selectedId !== id) return; // user switched projects mid-flight
+    renderActions(buttons);
+  } catch (err) {
+    console.warn('loadActions failed:', err.message);
+    $('#actions').innerHTML = '';
   }
 }
 
 async function runAction(button, btnEl) {
   if (!state.selectedId) return;
+  // Buttons that declare inputs prompt for them first (the modal acts as the
+  // confirmation). Otherwise fall back to the optional confirm() prompt.
+  if (button.inputs && button.inputs.length) {
+    openActionModal(button);
+    return;
+  }
   if (button.confirm && !confirm(button.confirm)) return;
+  await doRunAction(button, undefined, btnEl);
+}
 
-  btnEl.disabled = true;
+// Actually POST the action, optionally with a collected-input body, and
+// surface the result. `btnEl` (if given) is disabled while in flight.
+async function doRunAction(button, body, btnEl) {
+  if (!state.selectedId) return;
+  if (btnEl) btnEl.disabled = true;
   const result = $('#action-result');
   result.hidden = false;
   result.textContent = 'Running...';
@@ -178,21 +288,43 @@ async function runAction(button, btnEl) {
   try {
     const data = await api(
       'POST',
-      `/projects/${state.selectedId}/actions/${encodeURIComponent(button.id)}`
+      `/projects/${state.selectedId}/actions/${encodeURIComponent(button.id)}`,
+      body
     );
-    result.textContent = data.result?.message || 'Done.';
+    const msg = data.result?.message || 'Done.';
+    result.textContent = msg;
     // Refresh both the list (priorities/status may have changed) and the detail panel.
     await loadProjects();
     await refreshSelectedProject();
     // refreshSelectedProject resets the action-result, so show the message again briefly.
     result.hidden = false;
-    result.textContent = data.result?.message || 'Done.';
+    result.textContent = msg;
     setTimeout(() => { result.hidden = true; result.textContent = ''; }, 3000);
   } catch (err) {
+    result.hidden = false;
     result.textContent = `Error: ${err.message}`;
   } finally {
-    btnEl.disabled = false;
+    if (btnEl) btnEl.disabled = false;
   }
+}
+
+// ── Action-input modal ──────────────────────────────────────────────────
+function openActionModal(button) {
+  state.actionButton = button;
+  $('#action-modal-title').textContent = button.label;
+  // Pre-fill from each input's resolved `default` (the server already
+  // evaluated any function defaults against this project).
+  const values = {};
+  for (const f of button.inputs) if (f.default !== undefined) values[f.key] = f.default;
+  renderFieldDefs($('#action-fields'), button.inputs, values);
+  $('#action-modal').hidden = false;
+  $('#action-fields').querySelector('input, textarea, select')?.focus();
+}
+
+function closeActionModal() {
+  $('#action-modal').hidden = true;
+  $('#action-fields').innerHTML = '';
+  state.actionButton = null;
 }
 
 // Collect values from rendered field inputs into a plain object suitable for
@@ -270,11 +402,21 @@ function renderList() {
 function showView(name) {
   $('#view-list').hidden = name !== 'list';
   $('#view-project').hidden = name !== 'project';
+  $('#view-tasks').hidden = name !== 'tasks';
+  $('#view-settings').hidden = name !== 'settings';
+}
+
+// Highlight the active top-nav link for the given pathname.
+function setActiveNav(pathname) {
+  for (const a of document.querySelectorAll('#topnav a[data-nav]')) {
+    a.classList.toggle('active', a.dataset.nav === pathname);
+  }
 }
 
 // Route: /  — the projects list.
 async function listView() {
   showView('list');
+  setActiveNav('/');
   state.selectedId = null;
   state.selectedProject = null;
   realtime.setActiveProject(null); // leave any project room
@@ -284,7 +426,151 @@ async function listView() {
 // Route: /projects/:id  — a single project's page.
 async function projectView({ id }) {
   showView('project');
+  setActiveNav(null);
   await selectProject(Number(id));
+}
+
+// Routes: /assignments (current) and /tasks (all) — the logged-in user's
+// assignments across every project, grouped by project.
+async function tasksView(scope) {
+  showView('tasks');
+  setActiveNav(scope === 'current' ? '/assignments' : '/tasks');
+  state.selectedId = null;
+  state.selectedProject = null;
+  realtime.setActiveProject(null);
+
+  $('#tasks-title').textContent = scope === 'current' ? 'Current assignments' : 'All tasks';
+  $('#tasks-subtitle').textContent = scope === 'current'
+    ? 'Open assignments in each project’s active phase — what to work on now.'
+    : 'Every assignment assigned to you, across all projects.';
+
+  let tasks = [];
+  try {
+    tasks = await api('GET', `/me/assignments${scope === 'current' ? '?scope=current' : ''}`);
+  } catch (err) {
+    $('#tasks-list').innerHTML = '';
+    return;
+  }
+  renderTasks(tasks);
+}
+
+// Route: /settings — the logged-in user's own profile (name, email, phone, and
+// preferred contact method). Loads fresh from /auth/me, fills the form, and
+// PATCHes on save.
+let settingsWired = false;
+async function settingsView() {
+  showView('settings');
+  setActiveNav('/settings');
+  state.selectedId = null;
+  state.selectedProject = null;
+  realtime.setActiveProject(null);
+
+  const me = (await fetchMe()) || state.user || {};
+  const form = $('#settings-form');
+  form.elements.username.value = me.username || '';
+  form.elements.name.value = me.name || '';
+  form.elements.email.value = me.email || '';
+  form.elements.phone.value = me.phone || '';
+  form.elements.contact_preference.value = me.contactPreference || 'none';
+  setSettingsMsg('', null);
+
+  // Wire the submit handler once — the form element persists across visits.
+  if (settingsWired) return;
+  settingsWired = true;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      name: form.elements.name.value,
+      email: form.elements.email.value,
+      phone: form.elements.phone.value,
+      contact_preference: form.elements.contact_preference.value,
+    };
+    try {
+      const updated = await api('PATCH', '/auth/me', payload);
+      state.user = updated;
+      $('#user-name').textContent = updated.name || updated.username;
+      setSettingsMsg('Saved.', 'ok');
+    } catch (err) {
+      setSettingsMsg(err.message, 'error');
+    }
+  });
+}
+
+function setSettingsMsg(text, kind) {
+  const el = $('#settings-msg');
+  el.textContent = text;
+  el.className = 'settings-msg' + (kind ? ' ' + kind : '');
+  el.hidden = !text;
+}
+
+// Render tasks grouped by their project. Each project is a card listing its
+// assignments; clicking a row opens that project.
+function renderTasks(tasks) {
+  const root = $('#tasks-list');
+  root.innerHTML = '';
+  $('#tasks-count').textContent = tasks.length
+    ? `${tasks.length} assignment${tasks.length === 1 ? '' : 's'}`
+    : '';
+
+  if (tasks.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'Nothing assigned to you here.';
+    root.appendChild(empty);
+    return;
+  }
+
+  // Group by project (rows arrive ordered by project name already).
+  const groups = new Map();
+  for (const t of tasks) {
+    if (!groups.has(t.project_id)) groups.set(t.project_id, []);
+    groups.get(t.project_id).push(t);
+  }
+
+  for (const [projectId, items] of groups) {
+    const head = items[0];
+    const card = document.createElement('div');
+    card.className = 'task-group';
+
+    const title = document.createElement('a');
+    title.className = 'task-project';
+    title.href = `/projects/${projectId}`;
+    title.setAttribute('data-link', '');
+    const owned = state.user && head.project_owner_id === state.user.id;
+    title.innerHTML = `<span class="task-project-name"></span>
+      <span class="task-project-status">${head.project_status}</span>
+      ${owned ? '' : '<span class="task-badge">assigned</span>'}`;
+    title.querySelector('.task-project-name').textContent = head.project_name;
+    card.appendChild(title);
+
+    const ul = document.createElement('ul');
+    ul.className = 'task-items';
+    for (const t of items) {
+      const li = document.createElement('li');
+      li.className = 'task-item';
+
+      const dot = document.createElement('span');
+      dot.className = `a-dot ${t.status}`;
+
+      const ttl = document.createElement('span');
+      ttl.className = 'task-item-title' + (ASSIGNMENT_DONE.includes(t.status) ? ' done' : '');
+      ttl.textContent = t.title;
+
+      const phase = document.createElement('span');
+      phase.className = 'task-phase';
+      phase.textContent = t.phase_name + (t.phase_status === 'done' ? ' · done' : '');
+
+      const st = document.createElement('span');
+      st.className = `assignment-status ${t.status}`;
+      st.textContent = t.status;
+
+      li.append(dot, ttl, phase, st);
+      li.addEventListener('click', () => router.navigate(`/projects/${projectId}`));
+      ul.appendChild(li);
+    }
+    card.appendChild(ul);
+    root.appendChild(card);
+  }
 }
 
 // Route: anything else — a not-found page (reuses the project shell).
@@ -315,13 +601,44 @@ async function selectProject(id) {
   }
 
   state.selectedProject = p;
+  // Capability map drives every affordance below — same rules the server
+  // enforces (server/src/access/policy.js).
+  state.caps = p.capabilities || {};
+  const owns = can('project.edit'); // owner, regardless of project status
+
+  // Content is editable only when you may edit-content: owner AND project active.
+  // A closed (done/cancelled) project is frozen — the inline editors go
+  // read-only and a banner explains why. (Comments + lifecycle buttons stay.)
+  state.canEditSelected = can('project.edit-content');
+  $('#detail').classList.toggle('read-only', !state.canEditSelected);
+  const banner = $('#readonly-banner');
+  banner.hidden = state.canEditSelected;
+  if (!state.canEditSelected) {
+    banner.textContent = owns
+      ? `This project is ${p.status}. Reactivate it (Set active) to make changes.`
+      : "You’re assigned to this project but don’t own it — you can comment and update your own assignments.";
+  }
+
+  // Gate the static, owner-only affordances. Assignees keep the comment form.
+  $('#delete-project-btn').hidden = !owns;
+  // Lifecycle buttons (owner-only). An active project can be completed or
+  // cancelled; a non-active one (done/cancelled) can be set back to active.
+  $('#complete-project-btn').hidden = !owns || p.status !== 'active';
+  $('#cancel-project-btn').hidden   = !owns || p.status !== 'active';
+  $('#activate-project-btn').hidden = !owns || p.status === 'active';
+  $('#add-phase-btn').hidden = !can('phase.manage');
+  $('#checklist-form').hidden = !can('checklist.manage');
+  $('#comment-form').hidden = !can('comment.create');
+
   $('#detail-notfound').hidden = true;
   $('#detail').hidden = false;
   renderDetail(p);
-  renderActions(p);
+  await loadActions(id);
   $('#action-result').hidden = true;
   $('#action-result').textContent = '';
   await loadComments(id);
+  await loadPhases(id);
+  await loadChecklist(id);
 
   // Subscribe to project-scoped realtime events. setActiveProject leaves
   // the previous room first.
@@ -528,6 +845,16 @@ function addProp(root, label, display, opts) {
 // opts.onSave(val):  async, throws to keep the editor open with an error
 // opts.placeholder:  shown grayed-out when the value is empty
 function setEditableText(host, display, opts) {
+  // Read-only viewer (assignee, not owner): render plain text, no edit affordance.
+  if (state.selectedId && state.canEditSelected === false) {
+    host.classList.remove('editable', 'editing', 'placeholder');
+    host.onclick = null;
+    const isEmpty = (display === '' || display === null || display === undefined);
+    host.classList.toggle('placeholder', isEmpty);
+    host.textContent = isEmpty ? (opts.placeholder || '—') : String(display);
+    return;
+  }
+
   host.classList.add('editable');
   host.classList.remove('editing');
   host.innerHTML = '';
@@ -654,16 +981,379 @@ async function loadComments(projectId) {
     const li = document.createElement('li');
     li.className = 'comment';
     const body = document.createElement('div'); body.className = 'body'; body.textContent = c.body;
-    const ts   = document.createElement('span'); ts.className = 'ts'; ts.textContent = fmtDate(c.created_at);
-    const del  = document.createElement('button'); del.type = 'button'; del.textContent = '×';
-    del.title = 'Delete comment';
-    del.addEventListener('click', async () => {
-      await api('DELETE', `/comments/${c.id}`);
-      await loadComments(projectId);
-    });
-    li.append(body, ts, del);
+
+    const meta = document.createElement('span'); meta.className = 'ts';
+    const who = c.author || 'unknown';
+    meta.textContent = `${who} · ${fmtDate(c.created_at)}`;
+
+    li.append(body, meta);
+
+    // Server-computed from the policy; no rule duplicated on the client.
+    if (c.canDelete) {
+      const del = document.createElement('button'); del.type = 'button'; del.textContent = '×';
+      del.title = 'Delete comment';
+      del.addEventListener('click', async () => {
+        await api('DELETE', `/comments/${c.id}`);
+        await loadComments(projectId);
+      });
+      li.appendChild(del);
+    }
     ul.appendChild(li);
   }
+}
+
+// Tracks the row currently being dragged in the checklist. Module-scoped so
+// the (once-bound) delegated DnD handlers in wireEvents can share it.
+let clDragEl = null;
+
+async function loadChecklist(projectId) {
+  const items = await api('GET', `/projects/${projectId}/checklist`);
+  const ul = $('#checklist');
+  ul.innerHTML = '';
+
+  const done = items.filter((i) => i.done).length;
+  $('#checklist-progress').textContent = items.length ? `${done}/${items.length} done` : '';
+
+  if (items.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.style.padding = '8px';
+    li.textContent = 'No checklist items.';
+    ul.appendChild(li);
+    return;
+  }
+
+  const manage = can('checklist.manage'); // owner-only; assignees see it read-only
+  for (const it of items) {
+    const li = document.createElement('li');
+    li.className = 'checklist-item' + (it.done ? ' done' : '');
+    li.draggable = manage;
+    li.dataset.id = it.id;
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = !!it.done;
+    cb.disabled = !manage;
+    if (manage) {
+      cb.addEventListener('change', async () => {
+        try {
+          await api('PATCH', `/checklist/${it.id}`, { done: cb.checked });
+          await loadChecklist(projectId);
+        } catch (err) {
+          cb.checked = !cb.checked; // revert on failure
+          alert(err.message);
+        }
+      });
+    }
+
+    const text = document.createElement('span');
+    text.className = 'cl-text'; text.textContent = it.text;
+
+    li.append(cb, text);
+
+    if (manage) {
+      const handle = document.createElement('span');
+      handle.className = 'drag-handle'; handle.textContent = '⠿'; handle.title = 'Drag to reorder';
+      li.prepend(handle);
+
+      const del = document.createElement('button');
+      del.type = 'button'; del.className = 'cl-del'; del.textContent = '×'; del.title = 'Delete item';
+      del.addEventListener('click', async () => {
+        try { await api('DELETE', `/checklist/${it.id}`); await loadChecklist(projectId); }
+        catch (err) { alert(err.message); }
+      });
+      li.appendChild(del);
+    }
+
+    ul.appendChild(li);
+  }
+}
+
+// Given the pointer Y, find the row the dragged item should be inserted
+// before (or null to append at the end).
+function checklistDropTarget(ul, y) {
+  const rows = [...ul.querySelectorAll('.checklist-item:not(.dragging)')];
+  let closest = { offset: Number.NEGATIVE_INFINITY, el: null };
+  for (const child of rows) {
+    const box = child.getBoundingClientRect();
+    const offset = y - box.top - box.height / 2;
+    if (offset < 0 && offset > closest.offset) closest = { offset, el: child };
+  }
+  return closest.el;
+}
+
+// ─── Phases + assignments ───────────────────────────────────────────────
+
+// An assignment is "done" when it's resolved or cancelled.
+const ASSIGNMENT_DONE = ['resolved', 'cancelled'];
+
+// Registered accounts, cached for the assignee picker. Loaded on demand.
+let usersCache = null;
+async function getUsers() {
+  if (usersCache) return usersCache;
+  try { usersCache = await api('GET', '/users'); }
+  catch { usersCache = []; }
+  return usersCache;
+}
+function usernameById(id) {
+  return (usersCache || []).find((u) => u.id === id)?.username || null;
+}
+
+// Monotonic token: a slow load can't clobber a newer one, and two overlapping
+// loads (e.g. POST callback + realtime echo) can't double-render. The earlier
+// duplicate-phase bug came from awaiting BETWEEN clearing and appending — so
+// we now fetch everything first and do the clear+render in one sync block.
+let phasesLoadSeq = 0;
+
+async function loadPhases(projectId) {
+  const seq = ++phasesLoadSeq;
+
+  let phases, current, assignmentsByPhase;
+  try {
+    const res = await fetch(`${API}/projects/${projectId}/phases`, { credentials: 'include' });
+    if (!res.ok) return;
+    ({ data: phases, current } = await res.json());
+    assignmentsByPhase = await Promise.all(
+      phases.map((ph) => api('GET', `/phases/${ph.id}/assignments`).catch(() => []))
+    );
+    await getUsers(); // resolve user-type assignees by id at render time
+  } catch { return; }
+
+  // Drop this render if a newer load started or the user navigated away.
+  if (seq !== phasesLoadSeq || state.selectedId !== projectId) return;
+
+  const ol = $('#phases');
+  ol.innerHTML = ''; // from here on: no awaits, so renders never interleave
+
+  const doneCount = phases.filter((p) => p.status === 'done').length;
+  $('#phases-progress').textContent = phases.length ? `${doneCount}/${phases.length} done` : '';
+
+  if (phases.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'empty'; li.style.padding = '8px 2px';
+    li.textContent = 'No phases yet.';
+    ol.appendChild(li);
+    return;
+  }
+
+  phases.forEach((ph, i) => {
+    const isCurrent = current && current.id === ph.id;
+    ol.appendChild(renderPhase(projectId, ph, assignmentsByPhase[i], isCurrent));
+  });
+}
+
+// A small icon button used for the subtle, hover-revealed row actions.
+function iconBtn(glyph, title, onClick, extraClass = '') {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = ('icon-btn ' + extraClass).trim();
+  b.textContent = glyph;
+  b.title = title;
+  b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+  return b;
+}
+
+// Map the three phase states to a CSS class + label. 'active' reuses the
+// existing "current" styling; 'idle' has no decoration (base look).
+const PHASE_TONE = {
+  active: { cls: 'current', label: 'Active' },
+  done:   { cls: 'done',    label: 'Done' },
+  idle:   { cls: 'idle',    label: 'Idle' },
+};
+
+function renderPhase(projectId, phase, assignments, isCurrent) {
+  const tone = PHASE_TONE[phase.status] || PHASE_TONE.idle;
+  const li = document.createElement('li');
+  li.className = 'phase ' + tone.cls;
+  li.dataset.id = phase.id;
+
+  const head = document.createElement('div');
+  head.className = 'phase-head';
+
+  const name = document.createElement('span');
+  name.className = 'phase-name';
+  name.textContent = phase.name;
+
+  const doneN = assignments.filter((a) => ASSIGNMENT_DONE.includes(a.status)).length;
+  const count = document.createElement('span');
+  count.className = 'phase-count';
+  count.textContent = `${doneN}/${assignments.length}`;
+
+  const badge = document.createElement('span');
+  badge.className = 'phase-status ' + tone.cls;
+  badge.textContent = tone.label;
+
+  head.append(name, count, badge);
+  // Go backward: owner-only, shown only on passed (done) phases. Moves the
+  // project back to this phase so it can be edited again.
+  if (phase.canReopen) {
+    head.appendChild(iconBtn('↩', 'Reopen phase (go backward)', async () => {
+      if (!confirm(`Reopen "${phase.name}"? This moves the project back to this phase.`)) return;
+      try { await api('POST', `/phases/${phase.id}/reopen`); await loadPhases(projectId); await refreshSelectedProject(); }
+      catch (err) { alert(err.message); }
+    }));
+  }
+  // `canDelete` is server-computed: false once the phase is passed (done), so a
+  // frozen phase can't be deleted until it's reopened.
+  if (phase.canDelete) {
+    head.appendChild(iconBtn('×', 'Delete phase', async () => {
+      if (!confirm(`Delete phase "${phase.name}" and its assignments?`)) return;
+      try { await api('DELETE', `/phases/${phase.id}`); await loadPhases(projectId); await refreshSelectedProject(); }
+      catch (err) { alert(err.message); }
+    }, 'danger'));
+  }
+  li.appendChild(head);
+
+  if (phase.description) {
+    const desc = document.createElement('div');
+    desc.className = 'phase-desc';
+    desc.textContent = phase.description;
+    li.appendChild(desc);
+  }
+
+  const ul = document.createElement('ul');
+  ul.className = 'assignments';
+  for (const a of assignments) ul.appendChild(renderAssignment(projectId, a));
+  li.appendChild(ul);
+
+  // Open phases get a subtle add-assignment trigger (owner only). `canAddAssignment`
+  // is server-computed: false once the phase is passed (done), so frozen phases
+  // can't be assigned to until reopened.
+  if (phase.canAddAssignment) {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'add-assignment-btn';
+    add.textContent = '+ Add assignment';
+    add.addEventListener('click', () => openAssignmentModal(projectId, phase.id, phase.name));
+    li.appendChild(add);
+  }
+
+  return li;
+}
+
+function renderAssignment(projectId, a) {
+  const li = document.createElement('li');
+  const done = ASSIGNMENT_DONE.includes(a.status);
+  li.className = 'assignment' + (done ? ` ${a.status}` : '');
+
+  const dot = document.createElement('span');
+  dot.className = `a-dot ${a.status}`;
+  // For a cancelled assignment, surface WHY on hover; otherwise just the status.
+  dot.title = a.status === 'cancelled' && a.cancel_reason
+    ? `cancelled: ${a.cancel_reason}`
+    : a.status;
+
+  const title = document.createElement('span');
+  title.className = 'assignment-title';
+  title.textContent = a.title;
+  if (a.description) title.title = a.description;
+
+  // For user assignees, show the registered username (resolved by id, with the
+  // stored label as a fallback). For agents/bots, show the free-text name.
+  const who = document.createElement('span');
+  who.className = `assignee assignee-${a.assignee_type}`;
+  who.textContent = a.assignee_type === 'user'
+    ? (usernameById(a.assignee_user_id) || a.assignee_label || 'user')
+    : (a.assignee_label || a.assignee_type);
+  who.title = a.assignee_type;
+
+  // Server-computed from the policy. Resolve (mark own work done) is reserved to
+  // the assignee — a separate capability from canUpdate (cancel/reopen/edit,
+  // available to the owner too).
+  const mayResolve = a.canResolve;
+  const mayUpdate = a.canUpdate;
+  const mayDelete = a.canDelete;
+
+  const controls = document.createElement('span');
+  controls.className = 'assignment-controls';
+  const patchStatus = async (body) => {
+    try { await api('PATCH', `/assignments/${a.id}`, body); await loadPhases(projectId); await refreshSelectedProject(); }
+    catch (err) { alert(err.message); }
+  };
+  // Cancelling requires a reason — prompt for it and abort if none given.
+  const cancelWithReason = () => {
+    const reason = prompt('Why are you cancelling this assignment?');
+    if (reason === null) return;                 // user dismissed the prompt
+    if (!reason.trim()) { alert('A reason is required to cancel.'); return; }
+    patchStatus({ status: 'cancelled', cancel_reason: reason.trim() });
+  };
+  if (!done) {
+    // Resolve: assignee only. Cancel: owner or assignee (with a reason).
+    if (mayResolve) controls.append(iconBtn('✓', 'Resolve', () => patchStatus({ status: 'resolved' }), 'ok'));
+    if (mayUpdate)  controls.append(iconBtn('⊘', 'Cancel', cancelWithReason));
+  } else if (mayUpdate) {
+    controls.append(iconBtn('↺', 'Reopen', () => patchStatus({ status: 'open' })));
+  }
+  if (mayDelete) {
+    controls.append(iconBtn('×', 'Delete assignment', async () => {
+      try { await api('DELETE', `/assignments/${a.id}`); await loadPhases(projectId); await refreshSelectedProject(); }
+      catch (err) { alert(err.message); }
+    }, 'danger'));
+  }
+
+  li.append(dot, title, who);
+  // Show the cancellation reason inline (muted), so the record explains itself.
+  if (a.status === 'cancelled' && a.cancel_reason) {
+    const reason = document.createElement('span');
+    reason.className = 'cancel-reason';
+    reason.textContent = a.cancel_reason;
+    reason.title = a.cancel_reason;
+    li.append(reason);
+  }
+  li.append(controls);
+  return li;
+}
+
+// ── Phase modal ──
+let phaseModalProjectId = null;
+function openPhaseModal(projectId) {
+  phaseModalProjectId = projectId;
+  const form = $('#phase-form');
+  form.reset();
+  $('#phase-modal').hidden = false;
+  form.elements.name.focus();
+}
+function closePhaseModal() {
+  $('#phase-modal').hidden = true;
+  $('#phase-form').reset();
+  phaseModalProjectId = null;
+}
+
+// ── Assignment modal ──
+let assignmentModalCtx = null; // { projectId, phaseId }
+async function openAssignmentModal(projectId, phaseId, phaseName) {
+  assignmentModalCtx = { projectId, phaseId };
+  const form = $('#assignment-form');
+  form.reset();
+  $('#assignment-modal-title').textContent = `New assignment · ${phaseName}`;
+
+  // Populate the user picker from the registered accounts.
+  const users = await getUsers();
+  const sel = $('#assignee-user');
+  sel.innerHTML = '';
+  if (users.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = ''; opt.textContent = '(no users)';
+    sel.appendChild(opt);
+  }
+  for (const u of users) {
+    const opt = document.createElement('option');
+    opt.value = String(u.id); opt.textContent = u.username;
+    sel.appendChild(opt);
+  }
+  syncAssigneeFields();
+  $('#assignment-modal').hidden = false;
+  form.elements.title.focus();
+}
+function closeAssignmentModal() {
+  $('#assignment-modal').hidden = true;
+  $('#assignment-form').reset();
+  assignmentModalCtx = null;
+}
+// Show the user dropdown for type=user, the free-text name field otherwise.
+function syncAssigneeFields() {
+  const isUser = $('#assignee-type').value === 'user';
+  $('#assignee-user-field').hidden = !isUser;
+  $('#assignee-label-field').hidden = isUser;
 }
 
 function openModal()  { $('#modal').hidden = false; $('#create-form').elements.name.focus(); }
@@ -684,6 +1374,18 @@ function wireEvents() {
   $('#new-project-btn').addEventListener('click', openModal);
   $('#cancel-create').addEventListener('click', closeModal);
   $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
+
+  // Action-input modal: collect a button's declared inputs, then run it.
+  $('#action-cancel').addEventListener('click', closeActionModal);
+  $('#action-modal').addEventListener('click', (e) => { if (e.target.id === 'action-modal') closeActionModal(); });
+  $('#action-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const button = state.actionButton;
+    if (!button) return;
+    const body = collectFields($('#action-fields'));
+    closeActionModal();
+    await doRunAction(button, body);
+  });
 
 
   // Picking a type pre-fills the priority/status from that type's defaults
@@ -719,6 +1421,22 @@ function wireEvents() {
     router.navigate('/');
   });
 
+  // Project lifecycle: complete / cancel / reactivate. Each patches status,
+  // then refreshes the list and detail so the badge and buttons re-render.
+  const setProjectStatus = async (status, confirmMsg) => {
+    if (!state.selectedId) return;
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    try {
+      await api('PATCH', `/projects/${state.selectedId}`, { status });
+      await loadProjects();
+      await refreshSelectedProject();
+    } catch (err) { alert(err.message); }
+  };
+  $('#complete-project-btn').addEventListener('click', () => setProjectStatus('done'));
+  $('#cancel-project-btn').addEventListener('click',
+    () => setProjectStatus('cancelled', 'Cancel this project?'));
+  $('#activate-project-btn').addEventListener('click', () => setProjectStatus('active'));
+
   $('#comment-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!state.selectedId) return;
@@ -730,6 +1448,105 @@ function wireEvents() {
       await loadComments(state.selectedId);
     } catch (err) {
       alert(err.message);
+    }
+  });
+
+  // Phases: the header button opens a panel; submit posts and closes.
+  $('#add-phase-btn').addEventListener('click', () => {
+    if (state.selectedId) openPhaseModal(state.selectedId);
+  });
+  $('#phase-cancel').addEventListener('click', closePhaseModal);
+  $('#phase-modal').addEventListener('click', (e) => { if (e.target.id === 'phase-modal') closePhaseModal(); });
+  $('#phase-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const projectId = phaseModalProjectId;
+    if (!projectId) return;
+    const name = e.target.elements.name.value;
+    const description = e.target.elements.description.value;
+    if (!name.trim()) return;
+    try {
+      await api('POST', `/projects/${projectId}/phases`, { name, description });
+      closePhaseModal();
+      await loadPhases(projectId);
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+
+  // Assignments: panel opened per-phase by the add-assignment button.
+  $('#assignee-type').addEventListener('change', syncAssigneeFields);
+  $('#assignment-cancel').addEventListener('click', closeAssignmentModal);
+  $('#assignment-modal').addEventListener('click', (e) => { if (e.target.id === 'assignment-modal') closeAssignmentModal(); });
+  $('#assignment-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const ctx = assignmentModalCtx;
+    if (!ctx) return;
+    const f = e.target.elements;
+    const title = f.title.value.trim();
+    if (!title) return;
+    const type = f.assignee_type.value;
+    const payload = { title, description: f.description.value.trim() || null, assignee_type: type };
+    if (type === 'user') {
+      const uid = Number(f.assignee_user_id.value);
+      if (uid) {
+        payload.assignee_user_id = uid;
+        payload.assignee_label = usernameById(uid); // denormalize username for display
+      }
+    } else {
+      payload.assignee_label = f.assignee_label.value.trim() || null;
+    }
+    try {
+      await api('POST', `/phases/${ctx.phaseId}/assignments`, payload);
+      closeAssignmentModal();
+      await loadPhases(ctx.projectId);
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+
+  $('#checklist-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!state.selectedId) return;
+    const text = e.target.elements.text.value;
+    if (!text.trim()) return;
+    try {
+      await api('POST', `/projects/${state.selectedId}/checklist`, { text });
+      e.target.reset();
+      await loadChecklist(state.selectedId);
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+
+  // Drag-to-reorder. Bound once via delegation on the (persistent) <ul>;
+  // rows are recreated on every loadChecklist but the listeners live on the
+  // container, so they never accumulate.
+  const cl = $('#checklist');
+  cl.addEventListener('dragstart', (e) => {
+    const li = e.target.closest('.checklist-item');
+    if (!li) return;
+    clDragEl = li;
+    li.classList.add('dragging');
+  });
+  cl.addEventListener('dragover', (e) => {
+    if (!clDragEl) return;
+    e.preventDefault();
+    const before = checklistDropTarget(cl, e.clientY);
+    if (before) cl.insertBefore(clDragEl, before);
+    else cl.appendChild(clDragEl);
+  });
+  cl.addEventListener('dragend', async (e) => {
+    const li = e.target.closest('.checklist-item');
+    if (!li) return;
+    li.classList.remove('dragging');
+    clDragEl = null;
+    const orderedIds = [...cl.querySelectorAll('.checklist-item')].map((el) => Number(el.dataset.id));
+    if (!state.selectedId || orderedIds.length === 0) return;
+    try {
+      await api('POST', `/projects/${state.selectedId}/checklist/reorder`, { orderedIds });
+    } catch (err) {
+      alert(err.message);
+      await loadChecklist(state.selectedId); // restore server order on failure
     }
   });
 }
@@ -773,6 +1590,24 @@ function wireRealtime() {
     if (state.selectedId === projectId) loadComments(projectId);
   });
 
+  // Checklist churn on the currently-viewed project → refresh the checklist.
+  // Skip refresh mid-drag so an incoming event can't yank the row out from
+  // under the pointer.
+  for (const ev of ['checklist.created', 'checklist.updated', 'checklist.deleted', 'checklist.reordered']) {
+    realtime.on('project:*', ev, ({ projectId }) => {
+      if (state.selectedId === projectId && !clDragEl) loadChecklist(projectId);
+    });
+  }
+
+  // Phase/assignment churn on the currently-viewed project → reload phases.
+  // phase.completed may also flip the project to completed, so refresh detail.
+  for (const ev of ['phase.created', 'phase.updated', 'phase.deleted', 'phase.reordered', 'phase.completed',
+                    'assignment.created', 'assignment.updated', 'assignment.deleted']) {
+    realtime.on('project:*', ev, ({ projectId }) => {
+      if (state.selectedId === projectId) loadPhases(projectId);
+    });
+  }
+
   // List-level changes — always update the left pane.
   realtime.on('projects', 'project.created', () => loadProjects());
   realtime.on('projects', 'project.deleted', ({ id }) => {
@@ -787,6 +1622,19 @@ function wireRealtime() {
 }
 
 async function main() {
+  wireAuth();
+
+  // Gate on auth: no session → show the login overlay and stop here. The app
+  // (and the realtime socket) only initialize once logged in.
+  const user = await fetchMe();
+  if (!user) { showAuth(); return; }
+
+  state.user = user;
+  $('#user-name').textContent = user.name || user.username;
+  $('#user-area').hidden = false;
+  $('#topnav').hidden = false;
+  hideAuth();
+
   wireEvents();
   wireRealtime();
   await loadMeta();
@@ -795,6 +1643,9 @@ async function main() {
   router = createRouter(
     [
       route('/', listView),
+      route('/assignments', () => tasksView('current')),
+      route('/tasks', () => tasksView('all')),
+      route('/settings', settingsView),
       route('/projects/:id', projectView),
     ],
     notFoundView

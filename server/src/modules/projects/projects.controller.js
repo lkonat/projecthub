@@ -1,41 +1,50 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { projectsService } from './projects.service.js';
+import { access } from '../../access/access.service.js';
+import { userActor } from '../../access/actor.js';
 import { parseId, pickFields } from '../../middleware/validate.js';
 import { registry } from '../../extensions/registry.js';
-import { getDb } from '../../db/connection.js';
 import gitStatusTool from '../../../../extensions/shared/git/status.js';
 import gitDiffTool from '../../../../extensions/shared/git/diff.js';
 import gitRevertHunkTool from '../../../../extensions/shared/git/revert.js';
 
 const PROJECT_FIELDS = ['name', 'description', 'priority', 'status', 'type', 'fields', 'meta'];
 
+// Controllers are the WEB adapter: translate req → actor, delegate to services
+// (which authorize via the policy), and shape the HTTP response. Git endpoints
+// are web actions with no domain service, so they authorize inline via `access`.
 export const projectsController = {
   list(req, res) {
     const { priority, status, sort } = req.query;
-    res.json({ data: projectsService.list({ priority, status, sort }) });
+    res.json({ data: projectsService.list(userActor(req.user.id), { priority, status, sort }) });
   },
 
   getOne(req, res) {
     const id = parseId(req.params.id);
-    res.json({ data: projectsService.get(id) });
+    const actor = userActor(req.user.id);
+    const project = projectsService.view(actor, id); // authorizes project.view
+    // Ship the per-project capability map so the client renders affordances
+    // from the same policy the server enforces. `canEdit` kept for convenience.
+    const capabilities = access.capabilitiesFor(actor, project);
+    res.json({ data: { ...project, canEdit: capabilities['project.edit'], capabilities } });
   },
 
   async create(req, res) {
     const body = pickFields(req.body, PROJECT_FIELDS);
-    const project = await projectsService.create(body);
+    const project = await projectsService.create(userActor(req.user.id), body);
     res.status(201).json({ data: project });
   },
 
   async update(req, res) {
     const id = parseId(req.params.id);
     const patch = pickFields(req.body, PROJECT_FIELDS);
-    res.json({ data: await projectsService.update(id, patch) });
+    res.json({ data: await projectsService.update(userActor(req.user.id), id, patch) });
   },
 
   async remove(req, res) {
     const id = parseId(req.params.id);
-    await projectsService.remove(id);
+    await projectsService.remove(userActor(req.user.id), id);
     res.status(204).end();
   },
 
@@ -47,7 +56,7 @@ export const projectsController = {
   // "no git here" signal.
   async getGitStatus(req, res) {
     const id = parseId(req.params.id);
-    const project = projectsService.get(id);   // 404 if missing
+    const project = access.authorize(userActor(req.user.id), id, 'git.read');
 
     const gitClone = project?.fields?.gitClone;
     if (!gitClone) {
@@ -89,7 +98,7 @@ export const projectsController = {
   // never throws to the client for the "no git / bad path" cases.
   async getGitDiff(req, res) {
     const id = parseId(req.params.id);
-    const project = projectsService.get(id);   // 404 if missing
+    const project = access.authorize(userActor(req.user.id), id, 'git.read');
 
     const file = req.query.file;
     if (!file || typeof file !== 'string') {
@@ -127,7 +136,7 @@ export const projectsController = {
   // `available: false` no-throw contract as the other git endpoints.
   async revertGitHunk(req, res) {
     const id = parseId(req.params.id);
-    const project = projectsService.get(id);   // 404 if missing
+    const project = access.authorize(userActor(req.user.id), id, 'git.write');
 
     const { file, hunkIndex } = req.body || {};
     if (!file || typeof file !== 'string') {
@@ -160,18 +169,12 @@ export const projectsController = {
   // — multiple hooks can contribute different keys without colliding.
   async getMeta(req, res) {
     const id = parseId(req.params.id);
-    const project = projectsService.get(id);  // throws NotFound if missing
+    const project = projectsService.view(userActor(req.user.id), id);
 
     // Start with the project's own stored meta as a baseline.
     const response = { ...(project.meta || {}) };
 
-    const { services } = await import('../../services.js');
-    let realtime;
-    try { ({ realtime } = await import('../../realtime/index.js')); }
-    catch { realtime = { broadcast() {}, isStarted() { return false; } }; }
-    const ctx = { db: getDb(), log: console, services, realtime };
-
-    await registry.emit('project.meta-request', { project, response }, ctx);
+    await registry.emit('project.meta-request', { project, response });
 
     res.json({ data: response });
   },

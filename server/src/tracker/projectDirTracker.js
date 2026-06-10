@@ -134,7 +134,7 @@ class ProjectDirTracker {
         projectType: entry.projectType,
         count: events.length,
         paths,
-      }, undefined);
+      });
     } catch (err) {
       console.error('[projectDirTracker] emit project.file-changed failed:', err.message);
     }
