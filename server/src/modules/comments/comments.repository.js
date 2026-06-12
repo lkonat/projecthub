@@ -17,10 +17,10 @@ export const commentsRepository = {
     return getDb().prepare('SELECT * FROM comments WHERE id = ?').get(id);
   },
 
-  create({ projectId, body, userId = null }) {
+  create({ projectId, body, userId = null, parentId = null }) {
     const info = getDb()
-      .prepare('INSERT INTO comments (project_id, body, user_id) VALUES (?, ?, ?)')
-      .run(projectId, body, userId);
+      .prepare('INSERT INTO comments (project_id, body, user_id, parent_id) VALUES (?, ?, ?, ?)')
+      .run(projectId, body, userId, parentId);
     // Re-read via listByProject's shape so the created row carries `author`.
     return getDb()
       .prepare(

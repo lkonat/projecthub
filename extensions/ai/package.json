@@ -1,0 +1,10 @@
+{
+  "name": "projecthub-ai",
+  "private": true,
+  "type": "module",
+  "description": "AI layer for ProjectHub: LLM providers, agents, SDKs, and legacy task helpers. Scoped to this folder — every file under extensions/ai/ is ESM, so \"type\": \"module\" is warning-free and doesn't affect the mixed CommonJS/ESM files elsewhere under extensions/.",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1",
+    "openai": "^6.42.0"
+  }
+}

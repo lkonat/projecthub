@@ -97,6 +97,10 @@ export const POLICY = {
   // active phase; a non-owner assignee may do their OWN. `ctx.phase` required.
   'assignment.update': (ctx) =>
     projectActive(ctx) && phaseActive(ctx) && (isOwner(ctx) || ctx.roles.includes('assignmentOwner')),
+  // Running the assigned agent (enqueue an agent-run job). Owner-only, and only
+  // while the assignment's phase is ACTIVE — you run the work that's current, not
+  // an idle (not-started) or done (frozen) phase. `ctx.phase` required.
+  'assignment.run': (ctx) => isOwner(ctx) && projectActive(ctx) && phaseActive(ctx),
 
   // Comments — anyone assigned to the project may comment; authors (or the
   // owner) may delete.

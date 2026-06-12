@@ -183,7 +183,7 @@ export const phasesService = {
 
     const counts = assignmentsRepository.statusCounts(phaseId);
     const total = counts.total;
-    const done = counts.resolved + counts.cancelled;
+    const done = counts.done;
     if (total === 0 || done < total) {
       return { phase, completed: false };
     }

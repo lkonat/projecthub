@@ -3,6 +3,7 @@
 import { realtime } from './lib/realtime.js';
 import { createGitView } from './lib/gitView.js';
 import { createRouter, route } from './lib/router.js';
+import { ASSIGNMENT_STATUS, DONE_STATUSES, RUN_ACTIVE_STATUSES, EXECUTION_STATE } from './lib/assignmentStates.mjs';
 
 const API = '/api';
 
@@ -965,6 +966,40 @@ function enterEdit(host, opts) {
   });
 }
 
+// Builds the <li> for a single comment row (top-level or reply). `onReply`,
+// when provided, adds a Reply affordance that toggles an inline reply form.
+function commentNode(c, projectId, onReply) {
+  const li = document.createElement('li');
+  li.className = 'comment';
+  const body = document.createElement('div'); body.className = 'body'; body.textContent = c.body;
+
+  const meta = document.createElement('span'); meta.className = 'ts';
+  const who = c.author || 'unknown';
+  meta.textContent = `${who} · ${fmtDate(c.created_at)}`;
+
+  li.append(body, meta);
+
+  if (onReply) {
+    const reply = document.createElement('button'); reply.type = 'button';
+    reply.className = 'reply-btn'; reply.textContent = 'Reply';
+    reply.title = 'Reply to this comment';
+    reply.addEventListener('click', () => onReply(li));
+    li.appendChild(reply);
+  }
+
+  // Server-computed from the policy; no rule duplicated on the client.
+  if (c.canDelete) {
+    const del = document.createElement('button'); del.type = 'button'; del.textContent = '×';
+    del.className = 'del-btn'; del.title = 'Delete comment';
+    del.addEventListener('click', async () => {
+      await api('DELETE', `/comments/${c.id}`);
+      await loadComments(projectId);
+    });
+    li.appendChild(del);
+  }
+  return li;
+}
+
 async function loadComments(projectId) {
   const comments = await api('GET', `/projects/${projectId}/comments`);
   const ul = $('#comment-list');
@@ -977,28 +1012,57 @@ async function loadComments(projectId) {
     ul.appendChild(li);
     return;
   }
+
+  // Server returns a flat list newest-first. Split into top-level threads and
+  // replies keyed by parent; render replies oldest-first so a thread reads top
+  // to bottom under its parent.
+  const tops = comments.filter((c) => c.parent_id == null);
+  const repliesByParent = new Map();
   for (const c of comments) {
-    const li = document.createElement('li');
-    li.className = 'comment';
-    const body = document.createElement('div'); body.className = 'body'; body.textContent = c.body;
+    if (c.parent_id == null) continue;
+    if (!repliesByParent.has(c.parent_id)) repliesByParent.set(c.parent_id, []);
+    repliesByParent.get(c.parent_id).push(c);
+  }
 
-    const meta = document.createElement('span'); meta.className = 'ts';
-    const who = c.author || 'unknown';
-    meta.textContent = `${who} · ${fmtDate(c.created_at)}`;
-
-    li.append(body, meta);
-
-    // Server-computed from the policy; no rule duplicated on the client.
-    if (c.canDelete) {
-      const del = document.createElement('button'); del.type = 'button'; del.textContent = '×';
-      del.title = 'Delete comment';
-      del.addEventListener('click', async () => {
-        await api('DELETE', `/comments/${c.id}`);
-        await loadComments(projectId);
+  for (const c of tops) {
+    // Toggling the inline reply form for this thread.
+    const openReplyForm = (afterEl) => {
+      if (thread.querySelector('.reply-form')) return; // already open
+      const form = document.createElement('form');
+      form.className = 'comment-form reply-form';
+      const ta = document.createElement('textarea');
+      ta.rows = 2; ta.placeholder = 'Write a reply…'; ta.required = true;
+      const send = document.createElement('button');
+      send.className = 'primary'; send.type = 'submit'; send.textContent = 'Reply';
+      form.append(ta, send);
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const val = ta.value.trim();
+        if (!val) return;
+        try {
+          await api('POST', `/projects/${projectId}/comments`, { body: val, parentId: c.id });
+          await loadComments(projectId);
+        } catch (err) { alert(err.message); }
       });
-      li.appendChild(del);
+      afterEl.after(form);
+      ta.focus();
+    };
+
+    const thread = document.createElement('li');
+    thread.className = 'comment-thread';
+    const head = commentNode(c, projectId, openReplyForm);
+    thread.appendChild(head);
+
+    const replies = repliesByParent.get(c.id) || [];
+    if (replies.length) {
+      const sub = document.createElement('ul');
+      sub.className = 'comment-list reply-list';
+      for (const r of replies.slice().reverse()) {
+        sub.appendChild(commentNode(r, projectId, null));
+      }
+      thread.appendChild(sub);
     }
-    ul.appendChild(li);
+    ul.appendChild(thread);
   }
 }
 
@@ -1083,8 +1147,16 @@ function checklistDropTarget(ul, y) {
 
 // ─── Phases + assignments ───────────────────────────────────────────────
 
-// An assignment is "done" when it's resolved or cancelled.
-const ASSIGNMENT_DONE = ['resolved', 'cancelled'];
+// An assignment is "done" when it's completed or cancelled (shared constant).
+const ASSIGNMENT_DONE = DONE_STATUSES;
+
+// Truncate long text for display — agent result/error can be paragraphs; the row
+// (and its tooltip) should never show a wall of text. Returns a short snippet.
+function clip(text, max = 80) {
+  if (typeof text !== 'string') return '';
+  const s = text.trim();
+  return s.length > max ? `${s.slice(0, max).trimEnd()}…` : s;
+}
 
 // Registered accounts, cached for the assignee picker. Loaded on demand.
 let usersCache = null;
@@ -1096,6 +1168,15 @@ async function getUsers() {
 }
 function usernameById(id) {
   return (usersCache || []).find((u) => u.id === id)?.username || null;
+}
+
+// Registered, assignable agents, cached for the assignee picker. Loaded on demand.
+let agentsCache = null;
+async function getAgents() {
+  if (agentsCache) return agentsCache;
+  try { agentsCache = await api('GET', '/agents'); }
+  catch { agentsCache = []; }
+  return agentsCache;
 }
 
 // Monotonic token: a slow load can't clobber a newer one, and two overlapping
@@ -1230,6 +1311,35 @@ function renderPhase(projectId, phase, assignments, isCurrent) {
   return li;
 }
 
+// Enqueue an agent run, then poll for live status until it settles.
+async function runAgent(a, projectId) {
+  try {
+    await api('POST', `/assignments/${a.id}/run`, {});
+  } catch (err) { alert(err.message); return; }
+  await loadPhases(projectId);                    // reflect 'accepted' immediately
+  pollAgentRun(projectId, a.phase_id, a.id);
+}
+
+// An agent run is in flight while the queue has accepted it or it's executing.
+// Status now lives on the assignment itself (no separate run_status).
+const RUN_ACTIVE = new Set(RUN_ACTIVE_STATUSES);
+// Poll a single assignment's run until terminal, re-rendering the phase each
+// tick. Bounded, and stops if the user navigates away. (Run state isn't pushed
+// over realtime — it's written by the queue worker — so we poll.)
+async function pollAgentRun(projectId, phaseId, assignmentId, tries = 0) {
+  if (tries >= 20) return;                         // ~30s cap
+  await new Promise((r) => setTimeout(r, 1500));
+  if (state.selectedId !== projectId) return;      // navigated away
+  let list;
+  try { list = await api('GET', `/phases/${phaseId}/assignments`); }
+  catch { return; }
+  if (state.selectedId === projectId) await loadPhases(projectId);
+  const cur = list.find((x) => x.id === assignmentId);
+  if (cur && RUN_ACTIVE.has(cur.status)) {
+    pollAgentRun(projectId, phaseId, assignmentId, tries + 1);
+  }
+}
+
 function renderAssignment(projectId, a) {
   const li = document.createElement('li');
   const done = ASSIGNMENT_DONE.includes(a.status);
@@ -1238,7 +1348,7 @@ function renderAssignment(projectId, a) {
   const dot = document.createElement('span');
   dot.className = `a-dot ${a.status}`;
   // For a cancelled assignment, surface WHY on hover; otherwise just the status.
-  dot.title = a.status === 'cancelled' && a.cancel_reason
+  dot.title = a.status === ASSIGNMENT_STATUS.CANCELLED && a.cancel_reason
     ? `cancelled: ${a.cancel_reason}`
     : a.status;
 
@@ -1274,14 +1384,14 @@ function renderAssignment(projectId, a) {
     const reason = prompt('Why are you cancelling this assignment?');
     if (reason === null) return;                 // user dismissed the prompt
     if (!reason.trim()) { alert('A reason is required to cancel.'); return; }
-    patchStatus({ status: 'cancelled', cancel_reason: reason.trim() });
+    patchStatus({ status: ASSIGNMENT_STATUS.CANCELLED, cancel_reason: reason.trim() });
   };
   if (!done) {
-    // Resolve: assignee only. Cancel: owner or assignee (with a reason).
-    if (mayResolve) controls.append(iconBtn('✓', 'Resolve', () => patchStatus({ status: 'resolved' }), 'ok'));
+    // Complete: assignee only. Cancel: owner or assignee (with a reason).
+    if (mayResolve) controls.append(iconBtn('✓', 'Complete', () => patchStatus({ status: ASSIGNMENT_STATUS.COMPLETED }), 'ok'));
     if (mayUpdate)  controls.append(iconBtn('⊘', 'Cancel', cancelWithReason));
   } else if (mayUpdate) {
-    controls.append(iconBtn('↺', 'Reopen', () => patchStatus({ status: 'open' })));
+    controls.append(iconBtn('↺', 'Reopen', () => patchStatus({ status: ASSIGNMENT_STATUS.PENDING })));
   }
   if (mayDelete) {
     controls.append(iconBtn('×', 'Delete assignment', async () => {
@@ -1290,15 +1400,40 @@ function renderAssignment(projectId, a) {
     }, 'danger'));
   }
 
+  // Agent run: a status badge + a Run button (owner only). The run state IS the
+  // assignment status now; the 1:1 extension (`a.agent`) carries result/error.
+  let runBadge = null;
+  if (a.assignee_type === 'agent') {
+    const st = a.status;
+    runBadge = document.createElement('span');
+    runBadge.className = `run-status run-${st}`;
+    runBadge.textContent = st;
+    if (st === ASSIGNMENT_STATUS.FAILED && a.agent?.error) runBadge.title = clip(a.agent.error);
+    else if (st === ASSIGNMENT_STATUS.COMPLETED && a.agent?.result) runBadge.title = clip(a.agent.result);
+    // The agent's internal run-loop state (planning / waiting_tool / …) is a
+    // finer axis than the status — surface it on the tooltip when meaningful.
+    const exec = a.agent?.execution_state;
+    if (exec && exec !== EXECUTION_STATE.IDLE) runBadge.title = (runBadge.title ? `${runBadge.title} · ` : '') + `execution: ${exec}`;
+
+    const inFlight = RUN_ACTIVE.has(st);
+    if (a.canRun && !inFlight) {
+      controls.append(iconBtn('▶', st === ASSIGNMENT_STATUS.PENDING ? 'Run agent' : 'Run again', () => runAgent(a, projectId), 'run'));
+    }
+  }
+
   li.append(dot, title, who);
+  if (runBadge) li.append(runBadge);
   // Show the cancellation reason inline (muted), so the record explains itself.
-  if (a.status === 'cancelled' && a.cancel_reason) {
+  if (a.status === ASSIGNMENT_STATUS.CANCELLED && a.cancel_reason) {
     const reason = document.createElement('span');
     reason.className = 'cancel-reason';
     reason.textContent = a.cancel_reason;
     reason.title = a.cancel_reason;
     li.append(reason);
   }
+  // The agent's result/error is NOT shown inline — the 'failed'/'completed'
+  // badge conveys the outcome, and the (clipped) text is available on the badge's
+  // tooltip (hover). This keeps a failed run from spilling an error into the row.
   li.append(controls);
   return li;
 }
@@ -1340,6 +1475,22 @@ async function openAssignmentModal(projectId, phaseId, phaseName) {
     opt.value = String(u.id); opt.textContent = u.username;
     sel.appendChild(opt);
   }
+
+  // Populate the agent picker from the registered, assignable agents.
+  const agents = await getAgents();
+  const asel = $('#assignee-agent');
+  asel.innerHTML = '';
+  if (agents.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = ''; opt.textContent = '(no agents)';
+    asel.appendChild(opt);
+  }
+  for (const ag of agents) {
+    const opt = document.createElement('option');
+    opt.value = String(ag.id); opt.textContent = ag.title; // display title; submits id
+    asel.appendChild(opt);
+  }
+
   syncAssigneeFields();
   $('#assignment-modal').hidden = false;
   form.elements.title.focus();
@@ -1349,11 +1500,13 @@ function closeAssignmentModal() {
   $('#assignment-form').reset();
   assignmentModalCtx = null;
 }
-// Show the user dropdown for type=user, the free-text name field otherwise.
+// Show the field that matches the assignee type: a user dropdown, an agent
+// dropdown, or a free-text name (bot).
 function syncAssigneeFields() {
-  const isUser = $('#assignee-type').value === 'user';
-  $('#assignee-user-field').hidden = !isUser;
-  $('#assignee-label-field').hidden = isUser;
+  const type = $('#assignee-type').value;
+  $('#assignee-user-field').hidden  = type !== 'user';
+  $('#assignee-agent-field').hidden = type !== 'agent';
+  $('#assignee-label-field').hidden = type !== 'bot';
 }
 
 function openModal()  { $('#modal').hidden = false; $('#create-form').elements.name.focus(); }
@@ -1492,6 +1645,9 @@ function wireEvents() {
         payload.assignee_user_id = uid;
         payload.assignee_label = usernameById(uid); // denormalize username for display
       }
+    } else if (type === 'agent') {
+      const aid = Number(f.assignee_agent_id.value);
+      if (aid) payload.assignee_agent_id = aid; // server stamps the label from the agent's title
     } else {
       payload.assignee_label = f.assignee_label.value.trim() || null;
     }

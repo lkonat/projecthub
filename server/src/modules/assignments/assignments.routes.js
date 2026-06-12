@@ -9,5 +9,6 @@ phaseAssignmentsRouter.post('/', asyncHandler(assignmentsController.createForPha
 
 // Direct assignment ops: /api/assignments/:assignmentId
 export const assignmentsRouter = Router();
-assignmentsRouter.patch('/:assignmentId',  asyncHandler(assignmentsController.update));
-assignmentsRouter.delete('/:assignmentId', asyncHandler(assignmentsController.remove));
+assignmentsRouter.patch('/:assignmentId',     asyncHandler(assignmentsController.update));
+assignmentsRouter.delete('/:assignmentId',    asyncHandler(assignmentsController.remove));
+assignmentsRouter.post('/:assignmentId/run',  asyncHandler(assignmentsController.run));

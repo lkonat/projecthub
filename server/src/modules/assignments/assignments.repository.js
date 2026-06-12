@@ -1,4 +1,10 @@
 import { getDb } from '../../db/connection.js';
+import { DONE_STATUSES } from '../../constants/assignmentStates.js';
+
+// SQL list of the "done" statuses, derived from the shared constant so the
+// queries below can't drift from it. Safe to inline: these are fixed enum
+// values, never user input.
+const DONE_SQL = DONE_STATUSES.map((s) => `'${s}'`).join(',');
 
 export const assignmentsRepository = {
   listByPhase(phaseId) {
@@ -9,6 +15,14 @@ export const assignmentsRepository = {
 
   findById(id) {
     return getDb().prepare('SELECT * FROM assignments WHERE id = ?').get(id);
+  },
+
+  // Bump updated_at without changing any field — used when only the assignment's
+  // agent_assignments extension changed (the extension has no timestamps of its
+  // own; the parent's are authoritative).
+  touch(id) {
+    getDb().prepare("UPDATE assignments SET updated_at = datetime('now') WHERE id = ?").run(id);
+    return this.findById(id);
   },
 
   // Enriched columns shared by the "my assignments" queries: each assignment
@@ -56,7 +70,7 @@ export const assignmentsRepository = {
            JOIN phases ph   ON a.phase_id = ph.id
            JOIN projects pr ON ph.project_id = pr.id
           WHERE a.assignee_user_id = ?
-            AND a.status = 'open'
+            AND a.status NOT IN (${DONE_SQL})
             AND ph.status = 'open'
             AND ph.position = (
               SELECT MIN(p2.position) FROM phases p2
@@ -67,28 +81,26 @@ export const assignmentsRepository = {
       .all(userId);
   },
 
-  // Tally of assignment statuses for a phase. `total` is all assignments;
-  // resolved/cancelled together are the "done" ones.
+  // Tally for a phase. `total` is all assignments; `done` is the ones that no
+  // longer need work (completed or cancelled) — what phase completion keys on.
   statusCounts(phaseId) {
     return getDb()
       .prepare(
         `SELECT
-           COUNT(*)                                          AS total,
-           COALESCE(SUM(status = 'open'), 0)                 AS open,
-           COALESCE(SUM(status = 'resolved'), 0)             AS resolved,
-           COALESCE(SUM(status = 'cancelled'), 0)            AS cancelled
+           COUNT(*)                                                AS total,
+           COALESCE(SUM(status IN (${DONE_SQL})), 0)   AS done
          FROM assignments WHERE phase_id = ?`
       )
       .get(phaseId);
   },
 
-  create({ phaseId, title, description = null, assigneeType = 'user', assigneeLabel = null, assigneeUserId = null }) {
+  create({ phaseId, projectId = null, title, description = null, assigneeType = 'user', assigneeLabel = null, assigneeUserId = null, assigneeAgentId = null }) {
     const info = getDb()
       .prepare(
-        `INSERT INTO assignments (phase_id, title, description, assignee_type, assignee_label, assignee_user_id)
-         VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT INTO assignments (phase_id, project_id, title, description, assignee_type, assignee_label, assignee_user_id, assignee_agent_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(phaseId, title, description, assigneeType, assigneeLabel, assigneeUserId);
+      .run(phaseId, projectId, title, description, assigneeType, assigneeLabel, assigneeUserId, assigneeAgentId);
     return this.findById(info.lastInsertRowid);
   },
 
@@ -102,6 +114,7 @@ export const assignmentsRepository = {
     if (patch.assignee_type !== undefined)  { sets.push('assignee_type = ?');    args.push(patch.assignee_type); }
     if (patch.assignee_label !== undefined) { sets.push('assignee_label = ?');   args.push(patch.assignee_label); }
     if (patch.assignee_user_id !== undefined) { sets.push('assignee_user_id = ?'); args.push(patch.assignee_user_id); }
+    if (patch.assignee_agent_id !== undefined) { sets.push('assignee_agent_id = ?'); args.push(patch.assignee_agent_id); }
     if (patch.status !== undefined)         { sets.push('status = ?');           args.push(patch.status); }
     if (patch.cancel_reason !== undefined)  { sets.push('cancel_reason = ?');     args.push(patch.cancel_reason); }
     if (sets.length === 0) return this.findById(id);

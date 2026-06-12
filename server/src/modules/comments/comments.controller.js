@@ -11,7 +11,7 @@ export const commentsController = {
 
   async createForProject(req, res) {
     const projectId = parseId(req.params.id, 'project id');
-    const body = pickFields(req.body, ['body']);
+    const body = pickFields(req.body, ['body', 'parentId']);
     res.status(201).json({ data: await commentsService.create(userActor(req.user.id), projectId, body) });
   },
 

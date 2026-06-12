@@ -12,6 +12,10 @@ button/hook `id` must match `/^[a-z][a-z0-9_-]*$/i` — letters, digits, `_`, `-
 
 ```
 extensions/
+├── ai/                           # the AI layer — LLM providers + agents (see ai/README.md)
+│   ├── providers/                #   auto-loaded LLM providers (anthropic, openai)
+│   ├── agents/                   #   auto-loaded Agent instances
+│   └── tasks/                    #   legacy standalone helpers (not auto-loaded)
 ├── global/                       # extensions that apply across all types
 │   ├── hooks/
 │   └── buttons/

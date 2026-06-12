@@ -253,10 +253,19 @@ async function buildContext() {
   let realtime = NOOP_REALTIME;
   try { ({ realtime } = await import('../realtime/index.js')); }
   catch { /* realtime unavailable (e.g. some tests) — use the no-op */ }
+  // The AI framework's registries, so hooks/agents can reach providers and
+  // other agents. Lazy import avoids an evaluation cycle (ai → agentRegistry →
+  // this module).
+  let ai = null;
+  try {
+    const m = await import('../ai/index.js');
+    ai = { providers: m.providerRegistry, agents: m.agentRegistry };
+  } catch { /* ai layer unavailable — leave null */ }
   cachedCtx = {
     log: console,
     services,
     realtime,
+    ai,
     // A getter, not a captured handle: getDb() is a singleton (it never opens
     // a second connection), but a test may closeDb()/getDb() to swap it.
     get db() { return getDb(); },

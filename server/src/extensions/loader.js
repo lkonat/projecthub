@@ -3,6 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { config } from '../config/index.js';
 import { registry } from './registry.js';
+import { providerRegistry, agentRegistry, Agent } from '../ai/index.js';
 
 // Layout (see extensions/README.md):
 //
@@ -104,6 +105,40 @@ async function loadType(file, extRoot, expectedId) {
   }
 }
 
+// Agent framework: an LLM provider (extensions/ai/providers/*.js).
+async function loadProvider(file, extRoot) {
+  const src = shortPath(extRoot, file);
+  try {
+    providerRegistry.register(await importDefault(file), src);
+    return true;
+  } catch (err) {
+    fail('provider', src, err.message);
+    return false;
+  }
+}
+
+// Agent framework: an agent module (extensions/ai/agents/*.js). Files whose default
+// export isn't an Agent (e.g. the legacy task helpers, the shared client) are
+// skipped silently — only Agent instances are registered.
+async function loadAgent(file, extRoot) {
+  const src = shortPath(extRoot, file);
+  let def;
+  try {
+    def = await importDefault(file);
+  } catch (err) {
+    fail('agent', src, err.message);
+    return false;
+  }
+  if (!(def instanceof Agent)) return false; // not an agent module — skip
+  try {
+    agentRegistry.register(def, src);
+    return true;
+  } catch (err) {
+    fail('agent', src, err.message);
+    return false;
+  }
+}
+
 // Register the library buttons a type referenced in its `buttons: [...]`,
 // each scoped to that type. Returns how many registered successfully.
 function loadTypeButtons(typeDef, typeId, src) {
@@ -126,7 +161,7 @@ export async function loadExtensions() {
     return;
   }
 
-  let typeCount = 0, hookCount = 0, buttonCount = 0;
+  let typeCount = 0, hookCount = 0, buttonCount = 0, providerCount = 0, agentCount = 0;
   loadFailures = []; // reset for this pass (supports reload)
 
   // 1) Types and their scoped hooks/buttons.
@@ -183,11 +218,23 @@ export async function loadExtensions() {
     if (await loadButton(f, root, null)) buttonCount++;
   }
 
-  // 3) `shared/` is intentionally ignored — those are helpers, not extensions.
+  // 3) Agent framework. Everything AI lives under ai/: LLM providers + SDKs in
+  //    ai/providers/, and the project's agents in ai/agents/ (each
+  //    default-exports an Agent instance). Event agents auto-bind to their
+  //    lifecycle event via the registry. Non-Agent files are skipped by
+  //    loadAgent's instanceof check.
+  for (const f of listJsFiles(path.join(root, 'ai', 'providers'))) {
+    if (await loadProvider(f, root)) providerCount++;
+  }
+  for (const f of listJsFiles(path.join(root, 'ai', 'agents'))) {
+    if (await loadAgent(f, root)) agentCount++;
+  }
+
+  // 4) `shared/` is intentionally ignored — those are helpers, not extensions.
 
   console.log(
     `[extensions] loaded ${typeCount} type(s), ${hookCount} hook(s), ` +
-    `${buttonCount} button(s) from ${root}` +
+    `${buttonCount} button(s), ${providerCount} provider(s), ${agentCount} agent(s) from ${root}` +
     (loadFailures.length ? `  —  ⚠ ${loadFailures.length} FAILED` : '')
   );
 

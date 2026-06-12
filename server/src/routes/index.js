@@ -8,6 +8,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { projectPhasesRouter, phasesRouter } from '../modules/phases/phases.routes.js';
 import { phaseAssignmentsRouter, assignmentsRouter } from '../modules/assignments/assignments.routes.js';
 import { assignmentsController } from '../modules/assignments/assignments.controller.js';
+import { agentsRouter } from '../modules/agents/agents.routes.js';
 import { policyMatrix, ROLES } from '../access/policy.js';
 import { requireAuth } from '../middleware/auth.js';
 
@@ -22,6 +23,7 @@ api.use('/auth', authRouter); // register/login/logout are public; /me self-guar
 api.use(requireAuth);
 
 api.get('/users', asyncHandler(authController.listUsers)); // account directory for assignee pickers
+api.use('/agents', agentsRouter); // agent directory for assignee pickers
 api.get('/me/assignments', asyncHandler(assignmentsController.listMine)); // my tasks across all projects
 // Self-documenting access matrix: action -> roles allowed. Single source of
 // truth lives in src/access/policy.js; this just exposes it.

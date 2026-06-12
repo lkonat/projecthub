@@ -603,7 +603,14 @@ button.ghost:hover { border-color: var(--accent); }
 .comment .body { flex: 1; white-space: pre-wrap; }
 .comment .ts { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .comment button { background: transparent; border: none; color: var(--muted); padding: 0; }
-.comment button:hover { color: var(--danger); }
+.comment .del-btn:hover { color: var(--danger); }
+.comment .reply-btn { font-size: 11px; }
+.comment .reply-btn:hover { color: var(--text); }
+
+/* Threaded comments: a thread is the parent comment plus its replies. */
+.comment-thread { display: flex; flex-direction: column; gap: 6px; }
+.reply-list { margin-left: 20px; padding-left: 10px; border-left: 2px solid var(--border); }
+.reply-form { margin-left: 20px; }
 
 /* Checklist */
 .checklist-progress { font-size: 11px; color: var(--muted); text-transform: none; letter-spacing: 0; margin-left: 8px; }
@@ -676,22 +683,43 @@ button.mini.ghost:hover { color: var(--text); border-color: var(--muted); }
   padding: 7px 11px; border-top: 1px solid var(--border);
 }
 .assignment-title { font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.assignment.resolved .assignment-title,
+.assignment.completed .assignment-title,
 .assignment.cancelled .assignment-title { text-decoration: line-through; color: var(--muted); }
 /* Inline cancellation reason — muted, truncates, doesn't crowd the row. */
 .cancel-reason { font-size: 11px; color: var(--muted); font-style: italic; flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cancel-reason::before { content: "✕ "; }
 
-/* Status dot: open=accent, resolved=green, cancelled=red. */
+/* Status dot. Base (pending/accepted/in_progress) = accent; terminal states tinted. */
 .a-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--accent); }
-.a-dot.resolved { background: #34d399; }
-.a-dot.cancelled { background: var(--danger); }
+.a-dot.blocked,
+.a-dot.waiting     { background: #fbbf24; }
+.a-dot.completed   { background: #34d399; }
+.a-dot.failed,
+.a-dot.rejected,
+.a-dot.cancelled   { background: var(--danger); }
 
 .assignee { font-size: 11px; color: var(--muted); flex: none; }
 .assignee::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; vertical-align: middle; background: currentColor; }
 .assignee-user  { color: var(--accent); }
 .assignee-agent { color: #c084fc; }
 .assignee-bot   { color: #fbbf24; }
+
+/* Agent run status badge + inline output. */
+.run-status {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.02em; text-transform: capitalize;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); flex: none;
+}
+.run-status.run-pending     { color: var(--muted); }
+.run-status.run-accepted    { color: #fbbf24; border-color: rgba(251, 191, 36, 0.4);  background: rgba(251, 191, 36, 0.12); }
+.run-status.run-in_progress { color: var(--accent); border-color: rgba(91, 140, 255, 0.5); background: rgba(91, 140, 255, 0.12); }
+.run-status.run-blocked,
+.run-status.run-waiting     { color: #fbbf24; border-color: rgba(251, 191, 36, 0.4);  background: rgba(251, 191, 36, 0.12); }
+.run-status.run-completed   { color: #34d399; border-color: rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.12); }
+.run-status.run-failed,
+.run-status.run-rejected,
+.run-status.run-cancelled   { color: var(--danger); border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.12); }
+.icon-btn.run { color: #c084fc; }   /* match the agent accent */
+
 .assignment-controls { display: flex; align-items: center; gap: 2px; flex: none; }
 
 .add-assignment-btn {

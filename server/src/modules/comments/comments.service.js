@@ -15,11 +15,25 @@ export const commentsService = {
     }));
   },
 
-  async create(actor, projectId, { body }) {
+  async create(actor, projectId, { body, parentId = null }) {
     access.authorize(actor, projectId, 'comment.create'); // owner OR assignee
     const project = projectsService.get(projectId); // for the hook payload (.type)
     if (!body || !body.trim()) throw new ValidationError('body is required');
-    const comment = commentsRepository.create({ projectId, body: body.trim(), userId: actor.id });
+    // Replies attach to a parent comment. Validate it exists, belongs to this
+    // project, and is itself top-level so threads stay one level deep.
+    let parent = null;
+    if (parentId != null) {
+      parent = commentsRepository.findById(parentId);
+      if (!parent || parent.project_id !== projectId) {
+        throw new ValidationError('parent comment not found in this project');
+      }
+      if (parent.parent_id != null) {
+        throw new ValidationError('cannot reply to a reply');
+      }
+    }
+    const comment = commentsRepository.create({
+      projectId, body: body.trim(), userId: actor.id, parentId: parent ? parent.id : null,
+    });
     // Include `project` so type-scoped hooks on comment events route correctly.
     await registry.emit('comment.after-create', { comment, project, projectId });
     return comment;

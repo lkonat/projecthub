@@ -2,7 +2,7 @@ import { assignmentsService } from './assignments.service.js';
 import { userActor } from '../../access/actor.js';
 import { parseId, pickFields } from '../../middleware/validate.js';
 
-const CREATE_FIELDS = ['title', 'description', 'assignee_type', 'assignee_label', 'assignee_user_id'];
+const CREATE_FIELDS = ['title', 'description', 'assignee_type', 'assignee_label', 'assignee_user_id', 'assignee_agent_id'];
 const UPDATE_FIELDS = [...CREATE_FIELDS, 'status', 'cancel_reason'];
 
 // Thin web adapter: req → actor, delegate to the service (which authorizes).
@@ -35,5 +35,15 @@ export const assignmentsController = {
     const assignmentId = parseId(req.params.assignmentId, 'assignment id');
     await assignmentsService.remove(userActor(req.user.id), assignmentId);
     res.status(204).end();
+  },
+
+  // POST /api/assignments/:assignmentId/run — enqueue an agent run. Returns the
+  // queued job. Optional body { priority } overrides the project-derived default.
+  run(req, res) {
+    const assignmentId = parseId(req.params.assignmentId, 'assignment id');
+    const priority = Number.isInteger(req.body?.priority) ? req.body.priority : undefined;
+    const job = assignmentsService.requestRun(userActor(req.user.id), assignmentId, { priority });
+    console.log(job,"assignment run")
+    res.status(202).json({ data: job });
   },
 };
